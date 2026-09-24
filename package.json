@@ -1,0 +1,31 @@
+{
+  "name": "modaco-promotions",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.12.0",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "test:unit": "pnpm --filter @modaco/core test",
+    "db:generate": "pnpm --filter @modaco/core db:generate",
+    "db:migrate": "pnpm --filter @modaco/core db:migrate",
+    "schema:export": "tsx scripts/export-schema.ts",
+    "dev:api": "pnpm --filter @modaco/api dev",
+    "dev:runner": "pnpm --filter @modaco/ingest runner",
+    "build:lambda": "pnpm --filter @modaco/ingest build",
+    "seed": "tsx scripts/seed.ts",
+    "vendor-file": "tsx scripts/generate-vendor-file.ts",
+    "demo:ingest": "tsx scripts/demo-ingest.ts",
+    "demo:flash-sale": "tsx scripts/demo-flash-sale.ts"
+  },
+  "dependencies": {
+    "@modaco/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.3",
+    "vitest": "^3.0.5"
+  }
+}
