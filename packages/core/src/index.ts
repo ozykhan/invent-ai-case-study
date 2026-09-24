@@ -5,6 +5,7 @@ export * from './db/client';
 export * from './db/migrate';
 export * from './pricing/rules';
 export * from './ingest/csv';
+export * from './ingest/chunking';
 export * from './products/queries';
 export * from './cache/keys';
 export * from './cache/redis';
