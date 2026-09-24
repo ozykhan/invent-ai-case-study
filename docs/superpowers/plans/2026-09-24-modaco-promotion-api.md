@@ -24,7 +24,7 @@ Spec: `docs/superpowers/specs/2026-09-24-modaco-promotion-api-design.md`
 - Vendor CSV columns, in order: `sku,name,category,vendor_price,stock`. Header row present. UTF-8. No embedded newlines.
 - Pricing rules order: validate, margin, round up to `.99`, clamp to category floor and ceiling. Default category margin 30%, floor 0.99, ceiling 99999.99.
 - Local infrastructure names: bucket `modaco-vendor-uploads`, queues `modaco-s3-events`, `modaco-ingest-chunks`, `modaco-ingest-dlq`, LocalStack account `000000000000`, region `us-east-1`, credentials `test`/`test`.
-- Postgres local URL `postgres://modaco:modaco@localhost:5432/modaco`, Redis local URL `redis://localhost:6379`.
+- Postgres local URL `postgres://modaco:modaco@localhost:5433/modaco`, Redis local URL `redis://localhost:6379`.
 - All commits end with `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
 - Integration tests need the compose infrastructure running: `docker compose up -d postgres redis localstack`.
 
@@ -209,7 +209,7 @@ tmp/
 `.env.example`:
 ```
 PORT=3000
-DATABASE_URL=postgres://modaco:modaco@localhost:5432/modaco
+DATABASE_URL=postgres://modaco:modaco@localhost:5433/modaco
 REDIS_URL=redis://localhost:6379
 AWS_REGION=us-east-1
 AWS_ACCESS_KEY_ID=test
@@ -238,7 +238,7 @@ services:
       POSTGRES_USER: modaco
       POSTGRES_PASSWORD: modaco
       POSTGRES_DB: modaco
-    ports: ["5432:5432"]
+    ports: ["5433:5432"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U modaco"]
       interval: 3s
@@ -642,7 +642,7 @@ export default defineConfig({
   dialect: 'postgresql',
   schema: './src/db/schema.ts',
   out: './drizzle',
-  dbCredentials: { url: process.env.DATABASE_URL ?? 'postgres://modaco:modaco@localhost:5432/modaco' },
+  dbCredentials: { url: process.env.DATABASE_URL ?? 'postgres://modaco:modaco@localhost:5433/modaco' },
 });
 ```
 
@@ -658,7 +658,7 @@ export type Db = NodePgDatabase<typeof schema>;
 export type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
 export type DbOrTx = Db | Tx;
 
-export const TEST_DATABASE_URL = 'postgres://modaco:modaco@localhost:5432/modaco';
+export const TEST_DATABASE_URL = 'postgres://modaco:modaco@localhost:5433/modaco';
 
 export function createDb(connectionString: string, opts: { max?: number } = {}) {
   const pool = new pg.Pool({ connectionString, max: opts.max ?? 10 });
@@ -1896,7 +1896,7 @@ import { z } from 'zod';
 
 const schema = z.object({
   PORT: z.coerce.number().default(3000),
-  DATABASE_URL: z.string().default('postgres://modaco:modaco@localhost:5432/modaco'),
+  DATABASE_URL: z.string().default('postgres://modaco:modaco@localhost:5433/modaco'),
   REDIS_URL: z.string().default('redis://localhost:6379'),
   AWS_REGION: z.string().default('us-east-1'),
   AWS_ENDPOINT_URL: z.string().default('http://localhost:4566'),
@@ -3259,7 +3259,7 @@ export default defineConfig({ test: { include: ['test/**/*.test.ts'], testTimeou
 import { z } from 'zod';
 
 const schema = z.object({
-  DATABASE_URL: z.string().default('postgres://modaco:modaco@localhost:5432/modaco'),
+  DATABASE_URL: z.string().default('postgres://modaco:modaco@localhost:5433/modaco'),
   REDIS_URL: z.string().default('redis://localhost:6379'),
   AWS_REGION: z.string().default('us-east-1'),
   AWS_ENDPOINT_URL: z.string().optional(),
