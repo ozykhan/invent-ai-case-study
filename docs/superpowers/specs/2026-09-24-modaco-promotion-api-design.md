@@ -85,13 +85,15 @@ The same fragment is used by the listing sort, the listing projection, and the s
 | Key | Value | Purpose |
 |---|---|---|
 | `ver:category:{id}` | integer | bumped on any promotion or ingestion change touching the category |
-| `ver:product:{id}` | integer | bumped on a product-scoped promotion change or product update |
-| `product:{id}:v{pv}:c{cv}` | JSON, catalog fields plus resolved promotion, no stock | single product cache |
-| `list:{categoryId or all}:v{cv}:{sort}:{page}:{size}` | JSON, items without stock plus total count | listing cache |
+| `ver:product:{id}` | integer | bumped on a product-scoped promotion change or product create/update |
+| `ver:all` | integer | bumped whenever any category version is bumped; guards the uncategorized listing |
+| `product:{id}` | JSON `{ productVersion, categoryVersion, categoryId, record }`, record has no stock | single product cache |
+| `list:{categoryId or all}:{sort}:{page}:{size}` | JSON `{ version, items, total }`, items have no stock | listing cache |
+| `category:slug:{slug}` | integer category id | slug lookup for listings, long TTL |
 | `stock:{productId}` | integer | live stock, source of truth is Postgres, rebuilt on miss |
 | `lock:{cacheKey}` | short TTL | request coalescing on rebuild |
 
-The "all categories" listing uses a global version key `ver:all` that is bumped whenever any category version is bumped.
+Cache keys are not version-stamped. Each cached value records the version numbers it was built under, and a read compares them against the current version counters. A mismatch is treated as a miss and the entry is rebuilt and overwritten. This gives the same instant invalidation as version-stamped keys, without needing to know a product's category before reading it, and it leaves no orphaned entries. Warm path for a single product is two Redis round trips: one `MGET` for the product version and the entry, then one `MGET` for the category version and stock.
 
 Version bumps happen after the database commit. A bump that fails is retried three times and then logged as an alert.
 
@@ -200,7 +202,7 @@ Authentication, rate limiting, multi-currency, promotion stacking, product delet
 ## 11. Trade-offs to carry into ADR.md
 
 - Read-time effective price versus materialized column: O(1) promotion writes and automatic inclusion of new products, at the cost of a join on every uncached read and no index for effective-price sort.
-- Version-stamped keys versus explicit deletes: instant invalidation of arbitrarily many entries, at the cost of orphaned entries until TTL.
+- Version counters validated on read versus explicit deletes: instant invalidation of arbitrarily many entries with one increment, at the cost of one extra version lookup per read.
 - Most-recent-wins conflict rule: simplest consistent rule, but a category sale can shadow a better product promotion.
 - Split stock out of the cache: correct stock at the cost of one extra Redis read per item.
 - Byte-range fan-out: splitter cost independent of file size and parallel workers, at the cost of line-alignment logic and a bounded over-read per chunk.
