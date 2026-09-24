@@ -62,4 +62,31 @@ describe('readThrough', () => {
   it('works with a null redis', async () => {
     expect(await readThrough(null, 'k', async () => ({ value: 1, ttlSeconds: 1 }))).toEqual({ value: 1, source: 'bypass' });
   });
+
+  it('falls back to the builder when a command stalls past commandTimeout', async () => {
+    // CLIENT PAUSE stalls the server's replies to every connection, including new ones, for
+    // pauseMs; createRedis's commandTimeout (300ms) should reject `redis`'s GET client-side well
+    // before that. Note: CLIENT UNPAUSE is itself blocked by an active pause (verified against
+    // the compose Redis), so we can't lift the pause early — instead we pause for just longer
+    // than commandTimeout and let it expire naturally before the next test's beforeEach runs.
+    const pauser = createRedis('redis://localhost:6379');
+    await pauser.connect();
+    const pauseMs = 450;
+    const pauseStart = Date.now();
+    await pauser.call('CLIENT', 'PAUSE', String(pauseMs));
+    try {
+      const errors: unknown[] = [];
+      const start = Date.now();
+      const res = await readThrough(redis, 'k', async () => ({ value: 'paused', ttlSeconds: 10 }), {
+        onError: (e) => errors.push(e),
+      });
+      expect(res).toEqual({ value: 'paused', source: 'bypass' });
+      expect(errors.length).toBeGreaterThan(0);
+      expect(Date.now() - start).toBeLessThan(pauseMs);
+    } finally {
+      const remaining = pauseMs - (Date.now() - pauseStart) + 50;
+      if (remaining > 0) await new Promise((r) => setTimeout(r, remaining));
+      await pauser.quit();
+    }
+  });
 });

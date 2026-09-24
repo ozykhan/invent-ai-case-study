@@ -7,6 +7,7 @@ export function createRedis(url: string): Redis {
     maxRetriesPerRequest: 1,
     enableOfflineQueue: false,
     connectTimeout: 2000,
+    commandTimeout: 300,
     retryStrategy: (times) => Math.min(times * 200, 2000),
   });
 }

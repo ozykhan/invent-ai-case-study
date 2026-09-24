@@ -22,7 +22,13 @@ export async function bumpVersions(redis: Redis, versionKeys: string[], log: Log
     try {
       const pipe = redis.pipeline();
       for (const k of versionKeys) pipe.incr(k);
-      await pipe.exec();
+      // ioredis resolves pipeline().exec() with [err, result] pairs (or null) instead of
+      // rejecting when a queued command fails, so a dead-connection failure must be surfaced
+      // manually to trigger the retry loop below.
+      const results = await pipe.exec();
+      if (!results) throw new Error('pipeline exec returned null');
+      const failed = results.find(([err]) => err != null);
+      if (failed) throw failed[0];
       return;
     } catch (err) {
       lastErr = err;

@@ -1321,7 +1321,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ### Task 5: Cache keys, TTL rule, Redis client, versions, and read-through
 
 **Files:**
-- Create: `packages/core/src/cache/keys.ts`, `packages/core/src/cache/keys.test.ts`, `packages/core/src/cache/redis.ts`, `packages/core/src/cache/versions.ts`, `packages/core/src/cache/read-through.ts`, `packages/core/src/cache/read-through.test.ts`
+- Create: `packages/core/src/cache/keys.ts`, `packages/core/src/cache/keys.test.ts`, `packages/core/src/cache/redis.ts`, `packages/core/src/cache/versions.ts`, `packages/core/src/cache/versions.test.ts`, `packages/core/src/cache/read-through.ts`, `packages/core/src/cache/read-through.test.ts`
 - Modify: `packages/core/src/index.ts`
 
 **Interfaces:**
@@ -1422,6 +1422,7 @@ export function createRedis(url: string): Redis {
     maxRetriesPerRequest: 1,
     enableOfflineQueue: false,
     connectTimeout: 2000,
+    commandTimeout: 300,
     retryStrategy: (times) => Math.min(times * 200, 2000),
   });
 }
@@ -1455,7 +1456,13 @@ export async function bumpVersions(redis: Redis, versionKeys: string[], log: Log
     try {
       const pipe = redis.pipeline();
       for (const k of versionKeys) pipe.incr(k);
-      await pipe.exec();
+      // ioredis resolves pipeline().exec() with [err, result] pairs (or null) instead of
+      // rejecting when a queued command fails, so a dead-connection failure must be surfaced
+      // manually to trigger the retry loop below.
+      const results = await pipe.exec();
+      if (!results) throw new Error('pipeline exec returned null');
+      const failed = results.find(([err]) => err != null);
+      if (failed) throw failed[0];
       return;
     } catch (err) {
       lastErr = err;
