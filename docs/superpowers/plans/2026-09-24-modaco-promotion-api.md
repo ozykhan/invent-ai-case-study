@@ -1944,6 +1944,14 @@ export class HttpError extends Error {
 export const notFound = (message: string) => new HttpError(404, 'not_found', message);
 export const unprocessable = (message: string, details?: unknown) => new HttpError(422, 'unprocessable', message, details);
 export const conflict = (message: string) => new HttpError(409, 'conflict', message);
+
+// drizzle-orm 0.44 wraps driver errors in DrizzleQueryError; the pg SQLSTATE or
+// errno code lives on `cause`. Check both so raw pg errors keep working.
+export function pgErrorCode(err: unknown): string | undefined {
+  const e = err as { code?: unknown; cause?: { code?: unknown } } | undefined;
+  const code = e?.code ?? e?.cause?.code;
+  return typeof code === 'string' ? code : undefined;
+}
 ```
 
 - [ ] **Step 3: Middleware**
@@ -1996,7 +2004,7 @@ export function input<B = unknown, Q = unknown, P = unknown>(res: Response): { b
 ```ts
 import type { ErrorRequestHandler } from 'express';
 import type { Logger } from '../logger';
-import { HttpError } from '../errors';
+import { HttpError, pgErrorCode } from '../errors';
 
 const DB_UNAVAILABLE = new Set(['ECONNREFUSED', 'ETIMEDOUT', '57P01', '57P02', '57P03', '08006', '08001']);
 
@@ -2007,7 +2015,7 @@ export function errorHandler(logger: Logger): ErrorRequestHandler {
       res.status(err.status).json({ error: { code: err.code, message: err.message, details: err.details } });
       return;
     }
-    const code = (err as { code?: string })?.code;
+    const code = pgErrorCode(err);
     if (code && DB_UNAVAILABLE.has(code)) {
       logger.error({ err, requestId }, 'database unavailable');
       res.status(503).json({ error: { code: 'database_unavailable', message: 'database unavailable' } });
@@ -2633,7 +2641,7 @@ Expected: the four new tests FAIL with 404.
 
 - [ ] **Step 3: Extend the service**
 
-Add to `apps/api/src/products/service.ts` (imports: `eq`, `sql` from `drizzle-orm`; `categories`, `products`, `bumpCategory`, `bumpProduct` from `@modaco/core`; `conflict`, `unprocessable` from `../errors`; `setStock` from `./stock`; `CreateProductBody`, `StockBody` from `./schemas`):
+Add to `apps/api/src/products/service.ts` (imports: `eq`, `sql` from `drizzle-orm`; `categories`, `products`, `bumpCategory`, `bumpProduct` from `@modaco/core`; `conflict`, `unprocessable`, `pgErrorCode` from `../errors`; `setStock` from `./stock`; `CreateProductBody`, `StockBody` from `./schemas`):
 ```ts
   async createProduct(body: CreateProductBody): Promise<ProductItem> {
     const [cat] = await this.deps.db.select({ id: categories.id }).from(categories).where(eq(categories.id, body.categoryId));
@@ -2645,7 +2653,7 @@ Add to `apps/api/src/products/service.ts` (imports: `eq`, `sql` from `drizzle-or
       }).returning({ id: products.id });
       id = row!.id;
     } catch (err) {
-      if ((err as { code?: string }).code === '23505') throw conflict(`sku '${body.sku}' already exists`);
+      if (pgErrorCode(err) === '23505') throw conflict(`sku '${body.sku}' already exists`);
       throw err;
     }
     if (this.deps.redis) {
@@ -2665,7 +2673,7 @@ Add to `apps/api/src/products/service.ts` (imports: `eq`, `sql` from `drizzle-or
     try {
       [row] = await this.deps.db.update(products).set(set).where(eq(products.id, id)).returning({ id: products.id, stock: products.stock });
     } catch (err) {
-      if ((err as { code?: string }).code === '23514') throw unprocessable('stock cannot go below zero');
+      if (pgErrorCode(err) === '23514') throw unprocessable('stock cannot go below zero');
       throw err;
     }
     await setStock(this.deps, id, row!.stock);
