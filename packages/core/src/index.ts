@@ -6,3 +6,7 @@ export * from './db/migrate';
 export * from './pricing/rules';
 export * from './ingest/csv';
 export * from './products/queries';
+export * from './cache/keys';
+export * from './cache/redis';
+export * from './cache/versions';
+export * from './cache/read-through';
