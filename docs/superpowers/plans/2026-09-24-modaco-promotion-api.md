@@ -2232,9 +2232,11 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 **Files:**
 - Create: `apps/api/src/products/schemas.ts`, `apps/api/src/products/stock.ts`, `apps/api/src/products/cached-reads.ts`, `apps/api/src/products/service.ts`, `apps/api/src/products/routes.ts`, `apps/api/test/products.test.ts`
 - Modify: `apps/api/src/app.ts`
+- Modify: `packages/core/src/cache/redis.ts`, `packages/core/src/cache/versions.ts`, `packages/core/src/index.ts` (add `throwOnPipelineError`, see Step 0)
 
 **Interfaces:**
 - Produces:
+  - `throwOnPipelineError(results: [Error | null, unknown][] | null): void` in `@modaco/core` (throws when ioredis `pipeline().exec()` resolved with a null result or any per-command error)
   - `interface ProductItem extends ProductRecord { stock: number }`
   - `loadStocks(deps, ids: number[]): Promise<Map<number, number>>`
   - `setStock(deps, id: number, stock: number): Promise<void>` (Redis set with `STOCK_TTL_SECONDS`, swallows errors)
@@ -2243,6 +2245,19 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
   - `getCachedProductPage(deps, opts: { categoryId: number | null; sort: SortDir; page: number; pageSize: number }): Promise<{ items: ProductRecord[]; total: number }>`
   - `class ProductService { constructor(deps); getProduct(id): Promise<ProductItem | null>; listProducts(q: { category?: string; sort: 'effective_price' | '-effective_price'; page: number; pageSize: number }): Promise<{ items: ProductItem[]; pagination: { page: number; pageSize: number; total: number } }> }` (throws `notFound` for an unknown category slug)
   - `productRoutes(deps): Router`
+
+- [ ] **Step 0: Pipeline error helper in core**
+
+ioredis resolves `pipeline().exec()` with `[err, result]` pairs (or `null`) instead of rejecting, so `.catch` alone never sees per-command failures. Add to `packages/core/src/cache/redis.ts` and export it from `packages/core/src/index.ts` if `redis.ts` exports are not already re-exported wholesale:
+```ts
+/** ioredis resolves pipeline().exec() instead of rejecting; surface a null result or any per-command error. */
+export function throwOnPipelineError(results: [Error | null, unknown][] | null): void {
+  if (!results) throw new Error('pipeline exec returned null');
+  const failed = results.find(([err]) => err != null);
+  if (failed) throw failed[0];
+}
+```
+Refactor `bumpVersions` in `packages/core/src/cache/versions.ts` to call `throwOnPipelineError(await pipe.exec())` in place of its inline check (behavior unchanged; `versions.test.ts` must still pass). Add a unit test in `packages/core/src/cache/redis.test.ts`: null throws, an error pair throws that error, all-success pairs return.
 
 - [ ] **Step 1: Write the failing product read tests**
 
@@ -2396,7 +2411,7 @@ export type StockBody = z.infer<typeof stockBody>;
 
 `apps/api/src/products/stock.ts`:
 ```ts
-import { fetchStock, keys, STOCK_TTL_SECONDS } from '@modaco/core';
+import { fetchStock, keys, STOCK_TTL_SECONDS, throwOnPipelineError } from '@modaco/core';
 import type { AppDeps } from '../deps';
 
 /** Redis counters first, Postgres for misses, counters backfilled. Redis failure means Postgres only. */
@@ -2423,7 +2438,7 @@ export async function loadStocks(deps: AppDeps, ids: number[]): Promise<Map<numb
     if (deps.redis && fromDb.size > 0) {
       const pipe = deps.redis.pipeline();
       for (const [id, stock] of fromDb) pipe.set(keys.stock(id), String(stock), 'EX', STOCK_TTL_SECONDS);
-      await pipe.exec().catch((err) => deps.logger.warn({ err }, 'stock backfill failed'));
+      await pipe.exec().then(throwOnPipelineError).catch((err) => deps.logger.warn({ err }, 'stock backfill failed'));
     }
   }
   return out;
@@ -3793,7 +3808,7 @@ import type { Readable } from 'node:stream';
 import {
   bumpVersions, categories, categoryPricingFromRow, DEFAULT_CATEGORY_PRICING, fromCents, ingestionChunks, ingestionJobs,
   ingestionRejections, keys, ownedLines, parseCsvLine, priceVendorRow, products, rangeFor, rowFromFields, slugify,
-  STOCK_TTL_SECONDS, VENDOR_COLUMNS, type CategoryPricing, type Db, type PricedRow, type Redis,
+  STOCK_TTL_SECONDS, throwOnPipelineError, VENDOR_COLUMNS, type CategoryPricing, type Db, type PricedRow, type Redis,
 } from '@modaco/core';
 import type { Logger } from 'pino';
 import type { IngestDeps } from './deps';
@@ -3895,7 +3910,7 @@ class BatchWriter {
     if (written.length > 0) {
       const pipe = this.redis.pipeline();
       for (const w of written) pipe.set(keys.stock(w.id), String(w.stock), 'EX', STOCK_TTL_SECONDS);
-      await pipe.exec().catch((err) => log('stock counter publish failed', err));
+      await pipe.exec().then(throwOnPipelineError).catch((err) => log('stock counter publish failed', err));
     }
     if (categoryIds.length > 0) {
       await bumpVersions(this.redis, [...categoryIds.map(keys.categoryVersion), keys.allVersion()], log);
