@@ -94,7 +94,8 @@ export function registerLoad(program: Command): void {
         process.exitCode = doc.interrupted ? 130 : doc.ok ? 0 : 1;
       } finally {
         process.off('SIGINT', onSigint);
-        await client.close();
+        // Interrupted: requests that outlived the drain window are abandoned, not awaited up to --timeout.
+        await client.close({ force: ac.signal.aborted });
       }
     });
 }

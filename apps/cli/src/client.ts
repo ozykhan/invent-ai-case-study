@@ -126,7 +126,11 @@ export class ApiClient implements Transport {
     return (await this.call<Page<Rejection>>('GET', `/ingestion/jobs/${encodeURIComponent(id)}/rejections${query({ page: q.page, pageSize: q.pageSize })}`)).body;
   }
 
-  close(): Promise<void> {
-    return this.agent.close();
+  /**
+   * Closes the connection pool. By default it waits for requests still in flight (each bounded by --timeout).
+   * `force` aborts them instead: an interrupted load run must exit within its drain window.
+   */
+  close(opts: { force?: boolean } = {}): Promise<void> {
+    return opts.force ? this.agent.destroy() : this.agent.close();
   }
 }

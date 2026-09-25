@@ -1,3 +1,6 @@
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { performance } from 'node:perf_hooks';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ApiClient } from '../src/client';
 import { ApiError } from '../src/errors';
@@ -50,6 +53,25 @@ describe('ApiClient', () => {
     } finally {
       await c.close();
       await degraded.close();
+    }
+  });
+});
+
+describe('ApiClient.close', () => {
+  it('with force, returns at once instead of waiting for requests still in flight', async () => {
+    const hanging = createServer(() => { /* never answers */ });
+    await new Promise<void>((resolve) => hanging.listen(0, '127.0.0.1', resolve));
+    const c = new ApiClient({ baseUrl: `http://127.0.0.1:${(hanging.address() as AddressInfo).port}`, timeoutMs: 10_000 });
+    try {
+      const pending = c.health().catch((e: unknown) => e);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const t0 = performance.now();
+      await c.close({ force: true });
+      expect(performance.now() - t0).toBeLessThan(500);
+      expect(await pending).toBeInstanceOf(Error);
+    } finally {
+      hanging.closeAllConnections();
+      await new Promise<void>((resolve) => hanging.close(() => resolve()));
     }
   });
 });

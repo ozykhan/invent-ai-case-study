@@ -4,6 +4,8 @@ import type { AddressInfo } from 'node:net';
 
 /** The id POST /products returns; GET of it reads back with the stub's mid-sale price and the latest promotion. */
 export const MIDSALE_ID = 900001;
+/** The one ingestion job GET /ingestion/jobs/:id knows; any other id is a 404. */
+export const STUB_JOB_ID = '0f8fad5b-d9cb-469f-a165-70867728950e';
 const SLUGS = ['accessories', 'shoes', 'bags'];
 const INSTANCES = ['i1', 'i2', 'i3'];
 
@@ -39,6 +41,7 @@ export async function startStubApi(opts: { total?: number; degraded?: boolean; m
   const total = opts.total ?? 1000;
   const state: StubState = { hits: new Map(), samplePages: 0, openPromotions: new Set() };
   const promotionsById = new Map<string, Record<string, unknown>>();
+  const stockById = new Map<number, number>();
   let served = 0;
 
   const server = createServer(async (req, res) => {
@@ -78,8 +81,13 @@ export async function startStubApi(opts: { total?: number; degraded?: boolean; m
       }
       case 'POST /products':
         return send(201, { ...product(MIDSALE_ID), sku: body?.sku, basePrice: body?.basePrice });
-      case 'PATCH /products/:id/stock':
-        return send(200, { id: Number(segment), stock: Number(body?.stock ?? 0) });
+      case 'PATCH /products/:id/stock': {
+        // Mirrors the API's body: exactly one of { stock } (set) or { delta } (adjust); every product starts at 5.
+        const id = Number(segment);
+        const stock = typeof body?.stock === 'number' ? body.stock : (stockById.get(id) ?? 5) + Number(body?.delta ?? 0);
+        stockById.set(id, stock);
+        return send(200, { id, stock });
+      }
       case 'POST /promotions': {
         const id = randomUUID();
         state.openPromotions.add(id);
@@ -95,6 +103,23 @@ export async function startStubApi(opts: { total?: number; degraded?: boolean; m
         const cancelled = { ...existing, cancelledAt: new Date().toISOString() };
         promotionsById.set(segment, cancelled);
         return send(200, cancelled);
+      }
+      case 'PUT /promotions/:uuid/target': {
+        const existing = promotionsById.get(segment);
+        if (!existing) return send(404, { error: { code: 'not_found', message: `promotion ${segment} not found` } });
+        const moved = { ...existing, target: body };
+        promotionsById.set(segment, moved);
+        return send(200, moved);
+      }
+      case 'GET /ingestion/jobs/:uuid': {
+        const jobId = url.pathname.split('/')[3];
+        if (jobId !== STUB_JOB_ID) return send(404, { error: { code: 'not_found', message: `job ${jobId} not found` } });
+        // The API's JobView (apps/api/src/ingestion/service.ts).
+        return send(200, {
+          id: STUB_JOB_ID, status: 'processing', s3Key: `uploads/${STUB_JOB_ID}/vendor.csv`, totalChunks: 9, completedChunks: 3,
+          failedChunks: 0, rowsProcessed: 150000, rowsRejected: 12, error: null,
+          createdAt: '2026-09-25T10:00:00.000Z', updatedAt: '2026-09-25T10:00:05.000Z',
+        });
       }
       default:
         return send(404, { error: { code: 'not_found', message: 'route not found' } });
