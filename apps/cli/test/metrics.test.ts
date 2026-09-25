@@ -36,6 +36,26 @@ describe('Metrics', () => {
     expect(m.summary(1).byLabel.list!.latencyMs).toEqual({ mean: 0, p50: 0, p90: 0, p95: 0, p99: 0, p999: 0, max: 0 });
   });
 
+  it('counts a >= 500 status as errors.serverError, keeps it out of the histogram, but still shows it in status', () => {
+    const m = new Metrics();
+    m.record('list', 1000, 200, 'a');
+    m.record('list', 2000, 503, 'a');
+    m.record('list', 3000, 500, 'a');
+    m.record('list', 4000, 404, 'a'); // 4xx stays out of errors and in the histogram
+    const { total } = m.summary(1);
+    expect(total.count).toBe(2); // only the 200 and the 404
+    expect(total.status).toEqual({ '200': 1, '503': 1, '500': 1, '404': 1 });
+    expect(total.errors).toEqual({ serverError: 2 });
+  });
+
+  it('sizes the histogram from highestTrackableUs so a late response past the default 60s is not clamped', () => {
+    const m = new Metrics(120_000_000); // 120s
+    m.record('list', 90_000_000, 200, 'a'); // 90s, would be clamped to 60s at the old fixed ceiling
+    const max = m.summary(1).total.latencyMs.max;
+    expect(max).toBeGreaterThan(89_000);
+    expect(max).toBeLessThan(91_000);
+  });
+
   it('tallies responses per instance, with a missing header as unknown', () => {
     const m = new Metrics();
     m.record('list', 1000, 200, 'b');

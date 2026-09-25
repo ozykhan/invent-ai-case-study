@@ -4,7 +4,7 @@ import type { Command } from 'commander';
 import { ApiClient } from '../client';
 import { UsageError } from '../errors';
 import type { LoadModel } from '../load/engine';
-import { parseMix, parseRate } from '../load/parse';
+import { parseErrorRate, parseMix, parseRate } from '../load/parse';
 import { formatReport } from '../load/report';
 import { runLoad } from '../load/run';
 import { SCENARIOS, createScenario } from '../load/scenarios';
@@ -27,6 +27,7 @@ interface LoadFlags {
   category?: string;
   maxPage?: number;
   mix?: string;
+  maxErrorRate?: number;
 }
 
 export function registerLoad(program: Command): void {
@@ -46,6 +47,7 @@ export function registerLoad(program: Command): void {
     .option('--category <slug>', 'restrict requests to one category (flash-sale default: accessories)')
     .option('--max-page <n>', 'highest listing page requested (default 5)', intArg('max-page'))
     .option('--mix <mix>', 'request weights, e.g. list=70,detail=30 (browse: list, detail; write-mix: list, detail, stock, promo)')
+    .option('--max-error-rate <rate>', '5xx + transport error rate, 0-1, above which the run fails (default 0: any such error fails it)', arg(parseErrorRate))
     .action(async (name: string, flags: LoadFlags, cmd: Command) => {
       const g = globals(cmd);
       const def = SCENARIOS[name];
@@ -67,7 +69,13 @@ export function registerLoad(program: Command): void {
       const warmupMs = flags.warmup ?? 5_000;
       const maxPage = flags.maxPage ?? 5;
       const seed = flags.seed ?? Math.floor(Math.random() * 2 ** 31);
-      const connections = flags.connections ?? (model.kind === 'closed' ? Math.max(model.concurrency, 64) : 256);
+      const maxErrorRate = flags.maxErrorRate ?? 0;
+      // Closed model: one connection per worker is enough. Open model: enough to cover requests in flight for about
+      // one timeout at the target rate, floored at the old flat default and capped at --max-inflight (no point
+      // holding more connections than requests allowed to be outstanding at once).
+      const connections = flags.connections ?? (model.kind === 'closed'
+        ? Math.max(model.concurrency, 64)
+        : Math.max(256, Math.min(model.maxInflight, Math.ceil(model.rate * (g.timeoutMs / 1000)))));
       // Load-test promotions expire a minute after the run would end, so a killed run cleans up after itself.
       const scenario = createScenario(name, { category: flags.category, maxPage, mix, promotionTtlMs: warmupMs + durationMs + 60_000 });
 
@@ -77,11 +85,11 @@ export function registerLoad(program: Command): void {
       process.once('SIGINT', onSigint);
       try {
         const doc = await runLoad(client, scenario, {
-          model, durationMs, warmupMs, seed, reportEveryMs: flags.reportEvery ?? 5_000,
+          model, durationMs, warmupMs, seed, timeoutMs: g.timeoutMs, maxErrorRate, reportEveryMs: flags.reportEvery ?? 5_000,
           options: {
             model: model.kind,
             ...(model.kind === 'open' ? { rate: model.rate, rampMs: model.rampMs, maxInflight: model.maxInflight } : { concurrency: model.concurrency }),
-            durationMs, warmupMs, connections, timeoutMs: g.timeoutMs, seed, maxPage,
+            durationMs, warmupMs, connections, timeoutMs: g.timeoutMs, seed, maxPage, maxErrorRate,
             ...(flags.category ? { category: flags.category } : {}),
             ...(mix ? { mix } : {}),
           },

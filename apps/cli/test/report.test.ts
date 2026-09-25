@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatProgress, formatReport, type ResultDocument } from '../src/load/report';
+import { errorRate, formatProgress, formatReport, type PhaseResult, type ResultDocument } from '../src/load/report';
 
 const stats = (count: number) => ({
   count, rps: count / 10, latencyMs: { mean: 2, p50: 1.5, p90: 3, p95: 4, p99: 8, p999: 12, max: 20 },
@@ -26,6 +26,21 @@ describe('formatReport', () => {
     expect(text).toMatch(/b\s+200\s+66\.7%/);
     expect(text).toContain('FAIL mid-sale product discounted: expected 10.00');
     expect(text).toMatch(/promotionId\s+abc/);
+  });
+});
+
+describe('errorRate', () => {
+  it('is zero with no recorded phases', () => {
+    expect(errorRate([])).toEqual({ errors: 0, total: 0, rate: 0 });
+  });
+
+  it('sums 5xx and transport errors against successes plus errors, over every phase', () => {
+    const phases: PhaseResult[] = [
+      { name: 'before', elapsedSeconds: 1, total: { ...stats(90), errors: { serverError: 10 } }, byLabel: {} },
+      { name: 'after', elapsedSeconds: 1, total: { ...stats(190), errors: { serverError: 5, timeout: 5 } }, byLabel: {} },
+    ];
+    // errors: 10 + 5 + 5 = 20; total: (90 + 10) + (190 + 10) = 300
+    expect(errorRate(phases)).toEqual({ errors: 20, total: 300, rate: 20 / 300 });
   });
 });
 

@@ -30,6 +30,15 @@ export function parseMix(input: string, allowed: readonly string[]): Record<stri
   return mix;
 }
 
+/** "0", "0.02", "1" -> a fraction in [0, 1], e.g. for --max-error-rate. */
+export function parseErrorRate(input: string): number {
+  const trimmed = input.trim();
+  // Number('') is 0, and Number(' ') is also 0: reject anything that isn't itself a number literal.
+  const n = trimmed === '' ? Number.NaN : Number(trimmed);
+  if (!Number.isFinite(n) || n < 0 || n > 1) throw new UsageError(`invalid --max-error-rate '${input}' (a fraction between 0 and 1, e.g. 0.02 for 2%)`);
+  return n;
+}
+
 export function parseIntStrict(input: string, name: string, min = 1): number {
   const n = /^-?\d+$/.test(input.trim()) ? Number(input) : Number.NaN;
   if (!Number.isSafeInteger(n) || n < min) throw new UsageError(`${name} must be an integer >= ${min}, got '${input}'`);

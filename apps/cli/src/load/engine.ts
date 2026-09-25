@@ -170,14 +170,18 @@ export async function runPhase(transport: Transport, source: LoadSource, rng: Rn
   }
 
   const interrupted = aborted();
-  const stoppedAt = interrupted ? (abortedAt ?? performance.now()) : Math.min(performance.now(), deadline);
+  let stoppedAt = interrupted ? (abortedAt ?? performance.now()) : Math.min(performance.now(), deadline);
   const drain = Promise.allSettled([...inflight]);
   if (interrupted) {
     let grace: NodeJS.Timeout | undefined;
     await Promise.race([drain, new Promise<void>((resolve) => { grace = setTimeout(resolve, opts.drainTimeoutMs ?? 5000); })]);
     clearTimeout(grace);
   } else {
+    // In-flight requests still open at the deadline are recorded once they resolve, here. Measuring the span up to
+    // now (not up to the deadline) keeps rps = count / elapsedSeconds honest instead of overcounting a tail that
+    // ran after the nominal phase end.
     await drain;
+    stoppedAt = performance.now();
   }
   return { elapsedSeconds: (stoppedAt - start) / 1000, interrupted };
 }

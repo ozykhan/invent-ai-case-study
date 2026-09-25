@@ -1,7 +1,7 @@
 import type { ApiClient } from '../client';
 import { runPhase, type LoadModel, type LoadSource } from './engine';
 import { Metrics } from './metrics';
-import { formatProgress, type Check, type PhaseResult, type ResultDocument } from './report';
+import { errorRate, formatProgress, type Check, type PhaseResult, type ResultDocument } from './report';
 import { createRng } from './rng';
 import type { PhaseRunner, Scenario } from './scenarios/types';
 
@@ -11,11 +11,22 @@ export interface RunOptions {
   warmupMs: number;
   reportEveryMs: number;
   seed: number;
+  /** Per-request timeout, for sizing the latency histogram (see `histogramUs`). */
+  timeoutMs: number;
+  /** 5xx + transport error rate, in [0, 1], above which the run fails (ok=false). Default 0: any such error fails it. */
+  maxErrorRate: number;
   /** Echoed into the result document. */
   options: Record<string, unknown>;
 }
 
 export interface RunIo { log(msg: string): void; signal?: AbortSignal }
+
+/**
+ * The histogram must hold the slowest latency a phase could legitimately record: bounded by --timeout for any one
+ * request, or by the phase's own duration for an open-model request that fell far behind schedule (coordinated
+ * omission can charge it the whole phase). `Metrics` itself floors this at 60s.
+ */
+const histogramUs = (o: Pick<RunOptions, 'timeoutMs' | 'durationMs'>): number => Math.max(o.timeoutMs, o.durationMs) * 1000;
 
 /** Runs setup, the scenario's phases (default: warmup + "main") and cleanup, and assembles the result document. */
 export async function runLoad(client: ApiClient, scenario: Scenario, o: RunOptions, io: RunIo): Promise<ResultDocument> {
@@ -26,15 +37,10 @@ export async function runLoad(client: ApiClient, scenario: Scenario, o: RunOptio
   const checks: Check[] = [];
   const notes: Record<string, string> = {};
   let interrupted = false;
-  let rampPending = true;
-
-  // The ramp belongs to the first recorded phase only; warmup and later phases run at the full rate.
-  const modelFor = (recorded: boolean): LoadModel => {
-    if (o.model.kind !== 'open') return o.model;
-    const ramp = recorded && rampPending;
-    if (recorded) rampPending = false;
-    return ramp ? o.model : { ...o.model, rampMs: 0 };
-  };
+  // The ramp runs once, as its own unrecorded phase, right before the first recorded phase: its rising rate is not
+  // representative of steady state, so it must not land in that phase's percentiles.
+  let rampPending = o.model.kind === 'open' && o.model.rampMs > 0;
+  const flatModel = (): LoadModel => (o.model.kind === 'open' ? { ...o.model, rampMs: 0 } : o.model);
 
   const runner: PhaseRunner = {
     client,
@@ -44,15 +50,22 @@ export async function runLoad(client: ApiClient, scenario: Scenario, o: RunOptio
     async warmup(source: LoadSource = scenario) {
       if (o.warmupMs <= 0 || io.signal?.aborted) return;
       io.log(`warmup ${o.warmupMs / 1000}s (not recorded)`);
-      const r = await runPhase(client, source, rng, null, { model: modelFor(false), durationMs: o.warmupMs, signal: io.signal });
+      const r = await runPhase(client, source, rng, null, { model: flatModel(), durationMs: o.warmupMs, signal: io.signal });
       if (r.interrupted) interrupted = true;
     },
     async phase(name: string, durationMs: number, source: LoadSource = scenario) {
       if (io.signal?.aborted) { interrupted = true; return; }
+      if (rampPending && o.model.kind === 'open') {
+        rampPending = false;
+        io.log(`ramp ${o.model.rampMs / 1000}s to --rate (not recorded)`);
+        const rr = await runPhase(client, source, rng, null, { model: o.model, durationMs: o.model.rampMs, signal: io.signal });
+        if (rr.interrupted) interrupted = true;
+        if (io.signal?.aborted) { interrupted = true; return; }
+      }
       io.log(`phase ${name}: ${durationMs / 1000}s`);
-      const metrics = new Metrics();
+      const metrics = new Metrics(histogramUs({ timeoutMs: o.timeoutMs, durationMs }));
       const r = await runPhase(client, source, rng, metrics, {
-        model: modelFor(true), durationMs, signal: io.signal, reportEveryMs: o.reportEveryMs,
+        model: flatModel(), durationMs, signal: io.signal, reportEveryMs: o.reportEveryMs,
         onProgress: (s) => io.log(formatProgress(name, s)),
       });
       if (r.interrupted) interrupted = true;
@@ -76,6 +89,18 @@ export async function runLoad(client: ApiClient, scenario: Scenario, o: RunOptio
   }
   // A scenario may stop early on an abort that no phase saw (e.g. between phases); never report that as a full run.
   if (io.signal?.aborted) interrupted = true;
+
+  // Only surfaced when there was something to report: a clean run (the common case) shouldn't grow a
+  // trivially-passing "0 errors <= 0%" check on top of whatever the scenario itself checks.
+  const rate = errorRate(phases);
+  if (rate.errors > 0) {
+    const pct = (n: number) => `${(n * 100).toFixed(2)}%`;
+    checks.push({
+      name: 'error rate',
+      ok: rate.rate <= o.maxErrorRate,
+      message: `${pct(rate.rate)} (${rate.errors} of ${rate.total}) <= --max-error-rate ${pct(o.maxErrorRate)}`,
+    });
+  }
 
   return {
     scenario: scenario.name, target: client.baseUrl, startedAt, options: o.options,
