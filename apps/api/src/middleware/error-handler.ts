@@ -1,4 +1,4 @@
-import { CacheWaitTimeoutError } from '@modaco/core';
+import { CacheWaitTimeoutError, pgErrorMessage } from '@modaco/core';
 import type { ErrorRequestHandler } from 'express';
 import type { Logger } from '../logger';
 import { HttpError, pgErrorCode } from '../errors';
@@ -36,7 +36,7 @@ export function errorHandler(logger: Logger): ErrorRequestHandler {
     }
     if (isOverload(err)) {
       // No stack: under overload this fires per request, and serialising stacks would only add load.
-      logger.warn({ requestId, reason: err instanceof Error ? err.message : String(err) }, 'overloaded; shedding request');
+      logger.warn({ requestId, reason: pgErrorMessage(err) }, 'overloaded; shedding request');
       res.status(503).set('Retry-After', '1').json({ error: { code: 'overloaded', message: 'service overloaded, retry shortly' } });
       return;
     }
