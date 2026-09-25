@@ -3657,7 +3657,7 @@ export async function setupIngestTest(env: Record<string, string> = {}): Promise
       }
       return out;
     },
-    putObject: async (key, body) => { await real.s3.send(new PutObjectCommand({ Bucket: config.s3Bucket, Key: key, Body: body })); },
+    putObject: async (key, body) => { await real.s3.send(new PutObjectCommand({ Bucket: config.s3Bucket, Key: key, Body: body, ContentLength: Buffer.byteLength(body) })); },
     createJob: async (key) => {
       const [job] = await real.db.insert(ingestionJobs).values({ s3Key: key }).returning({ id: ingestionJobs.id });
       return job!.id;
@@ -3666,6 +3666,8 @@ export async function setupIngestTest(env: Record<string, string> = {}): Promise
   };
 }
 ```
+
+Fix round 1: `putObject` now passes an explicit `ContentLength` (`Buffer.byteLength(body)`) so an empty-body `PutObjectCommand` (used by the "completes an empty file immediately" test) doesn't hit the AWS SDK's "Stream of unknown length" stderr warning.
 
 - [ ] **Step 4: Write the failing splitter test**
 
@@ -3727,6 +3729,8 @@ describe('splitUpload', () => {
     expect((await ctx.deps.db.select().from(ingestionChunks).where(eq(ingestionChunks.jobId, jobId))).length).toBe(3);
     const messages = await ctx.receiveAll(ctx.deps.config.chunkQueueUrl, 2, 5000);
     expect(messages.map((m) => JSON.parse(m.Body!).chunkIndex).sort()).toEqual([1, 2]);
+    const extra = await ctx.receiveAll(ctx.deps.config.chunkQueueUrl, 1, 2000);
+    expect(extra).toEqual([]);
   });
 
   it('completes an empty file immediately', async () => {
@@ -3736,6 +3740,10 @@ describe('splitUpload', () => {
     expect(await splitUpload(ctx.deps, { key })).toEqual({ jobId, totalChunks: 0, contentLength: 0 });
     const [job] = await ctx.deps.db.select().from(ingestionJobs).where(eq(ingestionJobs.id, jobId));
     expect(job!.status).toBe('completed');
+    const chunks = await ctx.deps.db.select().from(ingestionChunks).where(eq(ingestionChunks.jobId, jobId));
+    expect(chunks).toEqual([]);
+    const messages = await ctx.receiveAll(ctx.deps.config.chunkQueueUrl, 1, 2000);
+    expect(messages).toEqual([]);
   });
 
   it('returns null for a key with no job', async () => {
@@ -3743,8 +3751,43 @@ describe('splitUpload', () => {
     await ctx.putObject(key, 'abc');
     expect(await splitUpload(ctx.deps, { key })).toBeNull();
   });
+
+  it('is a no-op when the job already finished (redelivered S3 event)', async () => {
+    const jobId = await ctx.createJob('placeholder');
+    const key = `uploads/${jobId}/vendor.csv`;
+    await ctx.deps.db.update(ingestionJobs).set({ s3Key: key }).where(eq(ingestionJobs.id, jobId));
+    await ctx.putObject(key, '0123456789');
+    await splitUpload(ctx.deps, { key });
+    await ctx.receiveAll(ctx.deps.config.chunkQueueUrl, 3);
+    await ctx.deps.db.update(ingestionChunks).set({ status: 'completed' }).where(eq(ingestionChunks.jobId, jobId));
+    await ctx.deps.db.update(ingestionJobs).set({ status: 'completed' }).where(eq(ingestionJobs.id, jobId));
+
+    await splitUpload(ctx.deps, { key });
+
+    const [job] = await ctx.deps.db.select().from(ingestionJobs).where(eq(ingestionJobs.id, jobId));
+    expect(job!.status).toBe('completed');
+    const messages = await ctx.receiveAll(ctx.deps.config.chunkQueueUrl, 1, 2000);
+    expect(messages).toEqual([]);
+  });
+
+  it('enqueues every chunk message when there are more than 10 chunks (batch-of-10 SQS sends)', async () => {
+    const jobId = await ctx.createJob('placeholder');
+    const key = `uploads/${jobId}/vendor.csv`;
+    await ctx.deps.db.update(ingestionJobs).set({ s3Key: key }).where(eq(ingestionJobs.id, jobId));
+    await ctx.putObject(key, '0'.repeat(45)); // 45 bytes, chunk size 4 -> 12 chunks, needs 2 SendMessageBatch calls
+
+    const result = await splitUpload(ctx.deps, { key });
+    expect(result).toEqual({ jobId, totalChunks: 12, contentLength: 45 });
+
+    const messages = await ctx.receiveAll(ctx.deps.config.chunkQueueUrl, 12);
+    expect(messages.map((m) => JSON.parse(m.Body!).chunkIndex).sort((a, b) => a - b)).toEqual(
+      Array.from({ length: 12 }, (_, i) => i),
+    );
+  });
 });
 ```
+
+Fix round 1: tightened the rerun test to assert the queue drains to empty, tightened the empty-file test to assert no chunk rows and no messages, and added two tests — a redelivery no-op regression (job already `completed`, chunks already `completed`, re-running `splitUpload` must leave the job `completed` and send nothing) and a >10-chunk case to exercise the `SendMessageBatchCommand` batch-of-10 split.
 
 - [ ] **Step 5: Run to verify failure**
 
@@ -3757,7 +3800,7 @@ Expected: FAIL, module `../src/splitter` not found.
 ```ts
 import { HeadObjectCommand } from '@aws-sdk/client-s3';
 import { SendMessageBatchCommand } from '@aws-sdk/client-sqs';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { computeChunks, ingestionChunks, ingestionJobs, type ChunkRange } from '@modaco/core';
 import { z } from 'zod';
 import type { IngestDeps } from './deps';
@@ -3777,6 +3820,9 @@ export function jobIdFromKey(key: string): string | null {
 
 type Deps = Pick<IngestDeps, 'db' | 's3' | 'sqs' | 'config' | 'logger'>;
 
+/** Statuses from which a split may still run: the job hasn't been finalized by the last chunk worker yet. */
+const SPLITTABLE_STATUSES = ['pending', 'splitting', 'processing'] as const;
+
 async function enqueue(deps: Deps, jobId: string, chunks: ChunkRange[]): Promise<void> {
   for (let i = 0; i < chunks.length; i += 10) {
     const batch = chunks.slice(i, i + 10);
@@ -3794,6 +3840,11 @@ async function enqueue(deps: Deps, jobId: string, chunks: ChunkRange[]): Promise
 /**
  * Splits an uploaded file into byte-range chunks using only its size (HEAD), records them, and enqueues one message per chunk.
  * Runtime is independent of file size. Safe to re-run: existing chunk rows are kept and only still-pending chunks are re-sent.
+ *
+ * A redelivered S3 event (or an at-least-once retry) must never resurrect a job the last chunk worker already finalized:
+ * once a job is 'completed' or 'failed' this is a no-op, and every status write below is conditioned on the job still
+ * being in a splittable status, so a last-worker finalize racing concurrently with a split loses cleanly (0 rows
+ * updated, nothing inserted, nothing enqueued) instead of being clobbered back to 'processing'.
  */
 export async function splitUpload(deps: Deps, input: { key: string }): Promise<{ jobId: string; totalChunks: number; contentLength: number } | null> {
   const jobId = jobIdFromKey(input.key);
@@ -3803,20 +3854,39 @@ export async function splitUpload(deps: Deps, input: { key: string }): Promise<{
 
   const head = await deps.s3.send(new HeadObjectCommand({ Bucket: deps.config.s3Bucket, Key: input.key }));
   const contentLength = head.ContentLength ?? 0;
+
+  if (job.status === 'completed' || job.status === 'failed') {
+    deps.logger.info({ jobId, status: job.status }, 'job already finished; ignoring redelivered split event');
+    return { jobId, totalChunks: job.totalChunks, contentLength };
+  }
+
   const chunks = computeChunks(contentLength, deps.config.chunkSizeBytes);
 
   if (chunks.length === 0) {
-    await deps.db.update(ingestionJobs).set({ status: 'completed', s3Key: input.key, totalChunks: 0, updatedAt: new Date() }).where(eq(ingestionJobs.id, jobId));
+    const done = await deps.db.update(ingestionJobs)
+      .set({ status: 'completed', s3Key: input.key, totalChunks: 0, updatedAt: new Date() })
+      .where(and(eq(ingestionJobs.id, jobId), inArray(ingestionJobs.status, SPLITTABLE_STATUSES)))
+      .returning({ id: ingestionJobs.id });
+    if (done.length === 0) deps.logger.info({ jobId }, 'job finished concurrently; skipping empty-file completion');
     return { jobId, totalChunks: 0, contentLength };
   }
 
+  let raced = false;
   await deps.db.transaction(async (tx) => {
-    await tx.update(ingestionJobs).set({ status: 'splitting', s3Key: input.key, updatedAt: new Date() }).where(eq(ingestionJobs.id, jobId));
+    const updated = await tx.update(ingestionJobs)
+      .set({ status: 'processing', s3Key: input.key, totalChunks: chunks.length, updatedAt: new Date() })
+      .where(and(eq(ingestionJobs.id, jobId), inArray(ingestionJobs.status, SPLITTABLE_STATUSES)))
+      .returning({ id: ingestionJobs.id });
+    if (updated.length === 0) { raced = true; return; }
     await tx.insert(ingestionChunks)
       .values(chunks.map((c) => ({ jobId, chunkIndex: c.chunkIndex, byteStart: c.byteStart, byteEnd: c.byteEnd })))
       .onConflictDoNothing({ target: [ingestionChunks.jobId, ingestionChunks.chunkIndex] });
-    await tx.update(ingestionJobs).set({ status: 'processing', totalChunks: chunks.length, updatedAt: new Date() }).where(eq(ingestionJobs.id, jobId));
   });
+
+  if (raced) {
+    deps.logger.info({ jobId }, 'job finished concurrently during split; skipping enqueue');
+    return { jobId, totalChunks: chunks.length, contentLength };
+  }
 
   const pending = await deps.db.select({ chunkIndex: ingestionChunks.chunkIndex, byteStart: ingestionChunks.byteStart, byteEnd: ingestionChunks.byteEnd })
     .from(ingestionChunks).where(and(eq(ingestionChunks.jobId, jobId), eq(ingestionChunks.status, 'pending')));
@@ -3827,10 +3897,12 @@ export async function splitUpload(deps: Deps, input: { key: string }): Promise<{
 }
 ```
 
+Fix round 1 (post-implementation review): a redelivered S3 event (or any retry) for a job the last chunk worker had already finalized would previously flip the job back to `processing` forever — nothing would be pending to enqueue, so it stayed stuck, and a failed job would be resurrected the same way. Fixed by returning a no-op result whenever `job.status` is already `completed`/`failed`, and by conditioning every remaining status-changing `UPDATE` on `status in ('pending','splitting','processing')` (via `SPLITTABLE_STATUSES`) so a concurrent last-worker finalize racing the split takes the row lock and wins cleanly instead of being overwritten. Also dropped the intermediate `'splitting'` write inside the transaction — it was immediately overwritten by the `'processing'` write in the same transaction and so was never externally visible; the enum value itself is unchanged and still valid for other code to use.
+
 - [ ] **Step 7: Run tests**
 
 Run: `pnpm --filter @modaco/ingest test test/splitter.test.ts`
-Expected: PASS, 5 tests.
+Expected: PASS, 7 tests.
 
 - [ ] **Step 8: Commit**
 

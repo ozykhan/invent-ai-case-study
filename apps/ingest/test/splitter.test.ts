@@ -54,6 +54,8 @@ describe('splitUpload', () => {
     expect((await ctx.deps.db.select().from(ingestionChunks).where(eq(ingestionChunks.jobId, jobId))).length).toBe(3);
     const messages = await ctx.receiveAll(ctx.deps.config.chunkQueueUrl, 2, 5000);
     expect(messages.map((m) => JSON.parse(m.Body!).chunkIndex).sort()).toEqual([1, 2]);
+    const extra = await ctx.receiveAll(ctx.deps.config.chunkQueueUrl, 1, 2000);
+    expect(extra).toEqual([]);
   });
 
   it('completes an empty file immediately', async () => {
@@ -63,11 +65,48 @@ describe('splitUpload', () => {
     expect(await splitUpload(ctx.deps, { key })).toEqual({ jobId, totalChunks: 0, contentLength: 0 });
     const [job] = await ctx.deps.db.select().from(ingestionJobs).where(eq(ingestionJobs.id, jobId));
     expect(job!.status).toBe('completed');
+    const chunks = await ctx.deps.db.select().from(ingestionChunks).where(eq(ingestionChunks.jobId, jobId));
+    expect(chunks).toEqual([]);
+    const messages = await ctx.receiveAll(ctx.deps.config.chunkQueueUrl, 1, 2000);
+    expect(messages).toEqual([]);
   });
 
   it('returns null for a key with no job', async () => {
     const key = 'uploads/00000000-0000-0000-0000-000000000000/x.csv';
     await ctx.putObject(key, 'abc');
     expect(await splitUpload(ctx.deps, { key })).toBeNull();
+  });
+
+  it('is a no-op when the job already finished (redelivered S3 event)', async () => {
+    const jobId = await ctx.createJob('placeholder');
+    const key = `uploads/${jobId}/vendor.csv`;
+    await ctx.deps.db.update(ingestionJobs).set({ s3Key: key }).where(eq(ingestionJobs.id, jobId));
+    await ctx.putObject(key, '0123456789');
+    await splitUpload(ctx.deps, { key });
+    await ctx.receiveAll(ctx.deps.config.chunkQueueUrl, 3);
+    await ctx.deps.db.update(ingestionChunks).set({ status: 'completed' }).where(eq(ingestionChunks.jobId, jobId));
+    await ctx.deps.db.update(ingestionJobs).set({ status: 'completed' }).where(eq(ingestionJobs.id, jobId));
+
+    await splitUpload(ctx.deps, { key });
+
+    const [job] = await ctx.deps.db.select().from(ingestionJobs).where(eq(ingestionJobs.id, jobId));
+    expect(job!.status).toBe('completed');
+    const messages = await ctx.receiveAll(ctx.deps.config.chunkQueueUrl, 1, 2000);
+    expect(messages).toEqual([]);
+  });
+
+  it('enqueues every chunk message when there are more than 10 chunks (batch-of-10 SQS sends)', async () => {
+    const jobId = await ctx.createJob('placeholder');
+    const key = `uploads/${jobId}/vendor.csv`;
+    await ctx.deps.db.update(ingestionJobs).set({ s3Key: key }).where(eq(ingestionJobs.id, jobId));
+    await ctx.putObject(key, '0'.repeat(45)); // 45 bytes, chunk size 4 -> 12 chunks, needs 2 SendMessageBatch calls
+
+    const result = await splitUpload(ctx.deps, { key });
+    expect(result).toEqual({ jobId, totalChunks: 12, contentLength: 45 });
+
+    const messages = await ctx.receiveAll(ctx.deps.config.chunkQueueUrl, 12);
+    expect(messages.map((m) => JSON.parse(m.Body!).chunkIndex).sort((a, b) => a - b)).toEqual(
+      Array.from({ length: 12 }, (_, i) => i),
+    );
   });
 });

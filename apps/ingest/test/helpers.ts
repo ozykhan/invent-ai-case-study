@@ -43,7 +43,7 @@ export async function setupIngestTest(env: Record<string, string> = {}): Promise
       }
       return out;
     },
-    putObject: async (key, body) => { await real.s3.send(new PutObjectCommand({ Bucket: config.s3Bucket, Key: key, Body: body })); },
+    putObject: async (key, body) => { await real.s3.send(new PutObjectCommand({ Bucket: config.s3Bucket, Key: key, Body: body, ContentLength: Buffer.byteLength(body) })); },
     createJob: async (key) => {
       const [job] = await real.db.insert(ingestionJobs).values({ s3Key: key }).returning({ id: ingestionJobs.id });
       return job!.id;
