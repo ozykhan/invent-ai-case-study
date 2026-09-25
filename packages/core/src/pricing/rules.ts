@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { clampCents, roundUpTo99, toCents } from '../money';
+import { PG_INT4_MAX } from '../db/schema';
+import { clampCents, MONEY_RE, roundUpTo99, toCents } from '../money';
 
 export interface CategoryPricing {
   marginPct: number;
@@ -21,8 +22,10 @@ export const rawVendorRowSchema = z.object({
   sku: z.string().trim().min(1, 'sku is required').max(64),
   name: z.string().trim().min(1, 'name is required').max(255),
   category: z.string().trim().min(1, 'category is required').max(100),
-  vendor_price: z.string().trim().regex(/^\d+(\.\d{1,2})?$/, 'vendor_price must be a decimal with up to 2 places'),
-  stock: z.string().trim().regex(/^\d+$/, 'stock must be a non-negative integer'),
+  vendor_price: z.string().trim().regex(MONEY_RE, 'vendor_price must be a decimal with up to 2 places and at most 10 integer digits'),
+  stock: z.string().trim()
+    .regex(/^\d{1,10}$/, 'stock must be a non-negative integer')
+    .refine((s) => Number(s) <= PG_INT4_MAX, `stock must be at most ${PG_INT4_MAX}`),
 });
 
 export interface PricedRow {
@@ -43,6 +46,11 @@ export function priceVendorRow(
   input: Record<string, string>,
   pricingFor: (category: string) => CategoryPricing,
 ): PricingOutcome {
+  // Postgres text cannot hold U+0000 (it fails the whole statement with 22021), so a NUL anywhere in the
+  // row is a validation failure rather than something to find out about at write time.
+  for (const [field, value] of Object.entries(input)) {
+    if (value.includes('\u0000')) return { ok: false, reason: `validation: ${field}: contains a NUL character (U+0000)` };
+  }
   const parsed = rawVendorRowSchema.safeParse(input);
   if (!parsed.success) {
     const issue = parsed.error.issues[0]!;

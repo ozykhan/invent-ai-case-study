@@ -1,3 +1,4 @@
+import { DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { eq } from 'drizzle-orm';
 import { ingestionChunks, ingestionJobs } from '@modaco/core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -93,6 +94,19 @@ describe('splitUpload', () => {
     expect(job!.status).toBe('completed');
     const messages = await ctx.receiveAll(ctx.deps.config.chunkQueueUrl, 1, 2000);
     expect(messages).toEqual([]);
+  });
+
+  it('is a clean no-op for a finished job whose object has since been deleted', async () => {
+    // The finished-job check must run before the HEAD: a redelivered event for a job that completed
+    // (and whose upload was cleaned up) would otherwise throw NotFound and be retried for nothing.
+    const jobId = await ctx.createJob('placeholder');
+    const key = `uploads/${jobId}/vendor.csv`;
+    await ctx.deps.db.update(ingestionJobs).set({ s3Key: key, status: 'completed', totalChunks: 3 }).where(eq(ingestionJobs.id, jobId));
+    await ctx.putObject(key, '0123456789');
+    await ctx.deps.s3.send(new DeleteObjectCommand({ Bucket: ctx.deps.config.s3Bucket, Key: key }));
+
+    await expect(splitUpload(ctx.deps, { key })).resolves.toEqual({ jobId, totalChunks: 3, contentLength: null });
+    expect(await ctx.receiveAll(ctx.deps.config.chunkQueueUrl, 1, 2000)).toEqual([]);
   });
 
   it('enqueues every chunk message when there are more than 10 chunks (batch-of-10 SQS sends)', async () => {

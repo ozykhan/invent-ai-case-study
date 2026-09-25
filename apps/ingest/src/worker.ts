@@ -3,8 +3,9 @@ import { and, eq, inArray, notInArray, sql } from 'drizzle-orm';
 import type { Readable } from 'node:stream';
 import {
   bumpVersions, categories, categoryPricingFromRow, DEFAULT_CATEGORY_PRICING, fromCents, ingestionChunks, ingestionJobs,
-  ingestionRejections, keys, ownedLines, parseCsvLine, priceVendorRow, products, rangeFor, rowFromFields, slugify,
-  STOCK_TTL_SECONDS, throwOnPipelineError, VENDOR_COLUMNS, type CategoryPricing, type Db, type PricedRow, type Redis,
+  ingestionRejections, isDataError, keys, ownedLines, parseCsvLine, pgErrorCode, pgErrorMessage, priceVendorRow, products,
+  rangeFor, rowFromFields, slugify, STOCK_TTL_SECONDS, throwOnPipelineError, VENDOR_COLUMNS, type CategoryPricing, type Db,
+  type DbOrTx, type PricedRow, type Redis,
 } from '@modaco/core';
 import type { Logger } from 'pino';
 import type { IngestDeps } from './deps';
@@ -15,6 +16,12 @@ type Deps = Pick<IngestDeps, 'db' | 's3' | 'redis' | 'config' | 'logger'>;
 
 interface PendingLine { lineNumber: number; raw: string }
 interface Rejection { lineNumber: number; rawLine: string; reason: string }
+interface PricedLine { lineNumber: number; raw: string; row: PricedRow }
+type Written = Array<{ id: number; stock: number }>;
+type CategoryMap = Map<string, { id: number; pricing: CategoryPricing }>;
+
+/** Postgres text cannot hold U+0000; a rejected line keeps everything else verbatim. */
+const storableLine = (raw: string) => raw.replaceAll('\u0000', '');
 
 /** Accumulates parsed lines and writes them in bounded batches. Memory never exceeds one batch. */
 class BatchWriter {
@@ -58,66 +65,114 @@ class BatchWriter {
     }
 
     const pricingByName = await this.ensureCategories([...new Set(validated.map((v) => v.row.category!.trim()).filter(Boolean))]);
-    const priced: PricedRow[] = [];
+    const priced: PricedLine[] = [];
     for (const { lineNumber, raw, row } of validated) {
       const outcome = priceVendorRow(row, (name) => pricingByName.get(name)?.pricing ?? DEFAULT_CATEGORY_PRICING);
       if (!outcome.ok) { rejections.push({ lineNumber, rawLine: raw, reason: outcome.reason }); continue; }
       // Two distinct names that slugify identically (e.g. "Shoes" and "shoes") cannot both exist; the loser is rejected.
       if (!pricingByName.has(outcome.row.category)) { rejections.push({ lineNumber, rawLine: raw, reason: `category '${outcome.row.category}' collides with an existing category slug` }); continue; }
-      priced.push(outcome.row);
+      priced.push({ lineNumber, raw, row: outcome.row });
     }
 
     // Postgres refuses to update the same row twice in one INSERT ... ON CONFLICT: dedupe within this
     // batch keeps only the row's last occurrence here. That guarantee is per batch only — across batches,
     // or across a retry of the same chunk, whichever upsert commits last wins.
-    const bySku = new Map<string, PricedRow>();
-    for (const r of priced) bySku.set(r.sku, r);
+    const bySku = new Map<string, PricedLine>();
+    for (const p of priced) bySku.set(p.row.sku, p);
     const unique = [...bySku.values()];
 
-    const touchedCategories = new Set<number>();
-    const written: Array<{ id: number; stock: number }> = [];
-    await this.db.transaction(async (tx) => {
-      if (unique.length > 0) {
-        const skus = unique.map((r) => r.sku);
-        // A vendor file can move an existing SKU into a different category. The OLD category's cached
-        // list pages, and the product's own cache entry (validated against the OLD ver:category), must be
-        // invalidated too — so capture the pre-upsert category before it gets overwritten below.
-        const existing = await tx.select({ categoryId: products.categoryId }).from(products).where(inArray(products.sku, skus));
-        for (const e of existing) touchedCategories.add(e.categoryId);
+    let touchedCategories = new Set<number>();
+    let written: Written = [];
+    let dbRejections: Rejection[] = [];
+    try {
+      await this.db.transaction(async (tx) => {
+        written = await this.upsert(tx, unique.map((u) => u.row), pricingByName, touchedCategories);
+        await this.insertRejections(tx, rejections);
+      });
+    } catch (err) {
+      // A data error (SQLSTATE class 22/23) is deterministic: the same batch fails the same way on every
+      // redelivery until the chunk dead-letters and fails the whole job. Validation is meant to catch every
+      // such row first; this is the safety net for one it missed. Anything else (connection loss, timeout,
+      // ...) is rethrown so the queue retries the chunk.
+      if (!isDataError(err)) throw err;
+      this.logger.warn({ err, jobId: this.jobId, chunkIndex: this.chunkIndex }, 'batch rejected by the database; retrying row by row');
+      ({ written, touchedCategories, dbRejections } = await this.writeRowByRow(unique, pricingByName));
+      for (const r of [...rejections, ...dbRejections]) await this.insertRejectionBestEffort(r);
+    }
 
-        const rows = await tx.insert(products).values(unique.map((r) => {
-          const categoryId = pricingByName.get(r.category)!.id;
-          touchedCategories.add(categoryId);
-          return { sku: r.sku, name: r.name, categoryId, basePrice: fromCents(r.basePriceCents), stock: r.stock };
-        })).onConflictDoUpdate({
-          target: products.sku,
-          set: {
-            name: sql.raw(`excluded.${products.name.name}`),
-            categoryId: sql.raw(`excluded.${products.categoryId.name}`),
-            basePrice: sql.raw(`excluded.${products.basePrice.name}`),
-            stock: sql.raw(`excluded.${products.stock.name}`),
-            updatedAt: sql`now()`,
-          },
-        }).returning({ id: products.id, stock: products.stock });
-        written.push(...rows);
-      }
-      if (rejections.length > 0) {
-        // A retried chunk re-parses and re-rejects the same lines; onConflictDoNothing on the (job,
-        // chunk, line) unique index keeps a redelivery from duplicating rows already committed by an
-        // earlier, partially-completed attempt.
-        await tx.insert(ingestionRejections)
-          .values(rejections.map((r) => ({ jobId: this.jobId, chunkIndex: this.chunkIndex, ...r })))
-          .onConflictDoNothing({ target: [ingestionRejections.jobId, ingestionRejections.chunkIndex, ingestionRejections.lineNumber] });
-      }
-    });
-
-    this.rowsProcessed += priced.length;
-    this.rowsRejected += rejections.length;
+    // Superseded in-batch duplicates of a SKU count as processed: their last occurrence is what was written.
+    this.rowsProcessed += priced.length - dbRejections.length;
+    this.rowsRejected += rejections.length + dbRejections.length;
     await this.publish(written, [...touchedCategories]);
   }
 
-  private async ensureCategories(names: string[]): Promise<Map<string, { id: number; pricing: CategoryPricing }>> {
-    const out = new Map<string, { id: number; pricing: CategoryPricing }>();
+  /** The fallback after a batch hit a data error: each row in its own transaction, the database's refusals become rejections. */
+  private async writeRowByRow(unique: PricedLine[], pricingByName: CategoryMap): Promise<{ written: Written; touchedCategories: Set<number>; dbRejections: Rejection[] }> {
+    const written: Written = [];
+    const touchedCategories = new Set<number>();
+    const dbRejections: Rejection[] = [];
+    for (const u of unique) {
+      const rowTouched = new Set<number>();
+      try {
+        written.push(...await this.db.transaction((tx) => this.upsert(tx, [u.row], pricingByName, rowTouched)));
+        for (const id of rowTouched) touchedCategories.add(id);
+      } catch (err) {
+        if (!isDataError(err)) throw err;
+        dbRejections.push({ lineNumber: u.lineNumber, rawLine: u.raw, reason: `database: ${pgErrorCode(err)}: ${pgErrorMessage(err)}` });
+      }
+    }
+    return { written, touchedCategories, dbRejections };
+  }
+
+  /**
+   * A rejection row is two integers and NUL-stripped text, so it is not expected to fail; if one still hits
+   * a data error, the line stays counted as rejected and the chunk goes on rather than failing on it forever.
+   */
+  private async insertRejectionBestEffort(r: Rejection): Promise<void> {
+    try {
+      await this.insertRejections(this.db, [r]);
+    } catch (err) {
+      if (!isDataError(err)) throw err;
+      this.logger.error({ err, jobId: this.jobId, chunkIndex: this.chunkIndex, lineNumber: r.lineNumber }, 'could not record rejection');
+    }
+  }
+
+  private async upsert(tx: DbOrTx, rows: PricedRow[], pricingByName: CategoryMap, touchedCategories: Set<number>): Promise<Written> {
+    if (rows.length === 0) return [];
+    // A vendor file can move an existing SKU into a different category. The OLD category's cached
+    // list pages, and the product's own cache entry (validated against the OLD ver:category), must be
+    // invalidated too — so capture the pre-upsert category before it gets overwritten below.
+    const existing = await tx.select({ categoryId: products.categoryId }).from(products).where(inArray(products.sku, rows.map((r) => r.sku)));
+    for (const e of existing) touchedCategories.add(e.categoryId);
+
+    return tx.insert(products).values(rows.map((r) => {
+      const categoryId = pricingByName.get(r.category)!.id;
+      touchedCategories.add(categoryId);
+      return { sku: r.sku, name: r.name, categoryId, basePrice: fromCents(r.basePriceCents), stock: r.stock };
+    })).onConflictDoUpdate({
+      target: products.sku,
+      set: {
+        name: sql.raw(`excluded.${products.name.name}`),
+        categoryId: sql.raw(`excluded.${products.categoryId.name}`),
+        basePrice: sql.raw(`excluded.${products.basePrice.name}`),
+        stock: sql.raw(`excluded.${products.stock.name}`),
+        updatedAt: sql`now()`,
+      },
+    }).returning({ id: products.id, stock: products.stock });
+  }
+
+  private async insertRejections(tx: DbOrTx, rejections: Rejection[]): Promise<void> {
+    if (rejections.length === 0) return;
+    // A retried chunk re-parses and re-rejects the same lines; onConflictDoNothing on the (job,
+    // chunk, line) unique index keeps a redelivery from duplicating rows already committed by an
+    // earlier, partially-completed attempt.
+    await tx.insert(ingestionRejections)
+      .values(rejections.map((r) => ({ jobId: this.jobId, chunkIndex: this.chunkIndex, lineNumber: r.lineNumber, rawLine: storableLine(r.rawLine), reason: r.reason })))
+      .onConflictDoNothing({ target: [ingestionRejections.jobId, ingestionRejections.chunkIndex, ingestionRejections.lineNumber] });
+  }
+
+  private async ensureCategories(names: string[]): Promise<CategoryMap> {
+    const out: CategoryMap = new Map();
     if (names.length === 0) return out;
     await this.db.insert(categories).values(names.map((name) => ({ name, slug: slugify(name) }))).onConflictDoNothing();
     const rows = await this.db.select().from(categories).where(inArray(categories.name, names));
@@ -137,6 +192,18 @@ class BatchWriter {
       await bumpVersions(this.redis, [...categoryIds.map(keys.categoryVersion), keys.allVersion()], log);
     }
   }
+}
+
+/**
+ * Passes the body through, then fails if it ended short of ContentLength. ownedLines cannot tell a truncated
+ * body from the natural end of the range, so without this a cut-off final line would be priced as if complete
+ * and everything after it silently dropped; failing instead lets the queue retry the chunk. (When ownedLines
+ * stops early, past byteEnd, the body is never drained and there is nothing to check.)
+ */
+async function* checkedLength(body: AsyncIterable<Uint8Array>, expected: number | undefined): AsyncGenerator<Uint8Array> {
+  let received = 0;
+  for await (const piece of body) { received += piece.length; yield piece; }
+  if (expected !== undefined && received !== expected) throw new Error(`short read from S3: got ${received} of ${expected} bytes`);
 }
 
 /**
@@ -176,7 +243,7 @@ export async function processChunk(deps: Deps, msg: ChunkMessage): Promise<{ ski
   try {
     const { rangeStart, rangeEnd } = rangeFor(chunk);
     const obj = await deps.s3.send(new GetObjectCommand({ Bucket: deps.config.s3Bucket, Key: job.s3Key, Range: `bytes=${rangeStart}-${rangeEnd}` }));
-    const body = obj.Body as Readable;
+    const body = checkedLength(obj.Body as Readable, obj.ContentLength);
 
     let skipHeader = chunk.byteStart === 0;
     let lineNumber = 0;

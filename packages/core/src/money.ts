@@ -1,9 +1,14 @@
-const DECIMAL_RE = /^\d+(\.\d{1,2})?$/;
+/**
+ * A non-negative money amount as text: up to 2 decimal places and at most 10 integer digits, so every
+ * accepted value fits a `numeric(12,2)` column (12 digits, 2 of them the fraction). An unbounded integer
+ * part would let a huge value reach Postgres and fail there with 22003 (numeric field overflow).
+ */
+export const MONEY_RE = /^\d{1,10}(\.\d{1,2})?$/;
 
 /** Parse a non-negative decimal (string or number) into integer cents. Throws on invalid input. */
 export function toCents(value: string | number): number {
   const s = typeof value === 'number' ? value.toFixed(2) : value.trim();
-  if (!DECIMAL_RE.test(s)) throw new Error(`invalid money value: ${String(value)}`);
+  if (!MONEY_RE.test(s)) throw new Error(`invalid money value: ${String(value)}`);
   const [whole, frac = ''] = s.split('.');
   return Number(whole) * 100 + Number(frac.padEnd(2, '0'));
 }

@@ -35,6 +35,25 @@ describe('priceVendorRow', () => {
     expect(priceVendorRow(row({ category: '   ' }), defaults)).toMatchObject({ ok: false, reason: expect.stringContaining('category') });
   });
 
+  it('bounds stock to the Postgres integer range', () => {
+    expect(priceVendorRow(row({ stock: '2147483647' }), defaults)).toMatchObject({ ok: true, row: { stock: 2147483647 } });
+    expect(priceVendorRow(row({ stock: '2147483648' }), defaults)).toMatchObject({ ok: false, reason: expect.stringContaining('stock') });
+    expect(priceVendorRow(row({ stock: '3000000000' }), defaults)).toMatchObject({ ok: false, reason: expect.stringContaining('stock') });
+    expect(priceVendorRow(row({ stock: '00000000001' }), defaults)).toMatchObject({ ok: false, reason: expect.stringContaining('stock') });
+  });
+
+  it('bounds vendor_price to numeric(12,2): at most 10 integer digits', () => {
+    expect(priceVendorRow(row({ vendor_price: '9999999999.99' }), defaults)).toMatchObject({ ok: true });
+    expect(priceVendorRow(row({ vendor_price: '12345678901.00' }), defaults)).toMatchObject({ ok: false, reason: expect.stringContaining('vendor_price') });
+  });
+
+  it('rejects any field containing a NUL character, which Postgres text cannot store', () => {
+    for (const field of ['sku', 'name', 'category', 'vendor_price', 'stock']) {
+      const bad = row({ [field]: `${row()[field as keyof ReturnType<typeof row>]}\u0000` });
+      expect(priceVendorRow(bad, defaults)).toMatchObject({ ok: false, reason: expect.stringMatching(new RegExp(`${field}.*NUL`)) });
+    }
+  });
+
   it('trims whitespace on text fields', () => {
     const out = priceVendorRow(row({ sku: '  SKU-9 ', name: ' Hat ' }), defaults);
     expect(out.ok && out.row).toMatchObject({ sku: 'SKU-9', name: 'Hat' });

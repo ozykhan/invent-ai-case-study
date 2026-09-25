@@ -5,6 +5,12 @@ import {
 
 export const discountTypeEnum = pgEnum('discount_type', ['percentage', 'fixed']);
 export const promotionScopeEnum = pgEnum('promotion_scope', ['product', 'category']);
+/** Largest value a Postgres `integer` (int4) column accepts; anything larger fails with 22003. */
+export const PG_INT4_MAX = 2_147_483_647;
+
+// 'splitting' is reserved and currently unused: the splitter moves a job straight from 'pending' to
+// 'processing' in one transaction. It stays in the enum because dropping a Postgres enum value needs a
+// type-rebuilding migration for no behavioral gain.
 export const jobStatusEnum = pgEnum('ingestion_job_status', ['pending', 'splitting', 'processing', 'completed', 'failed']);
 export const chunkStatusEnum = pgEnum('ingestion_chunk_status', ['pending', 'processing', 'completed', 'failed']);
 

@@ -12,6 +12,10 @@ describe('toCents', () => {
     expect(() => toCents('abc')).toThrow();
     expect(() => toCents('1.234')).toThrow();
     expect(() => toCents('-1')).toThrow();
+    expect(() => toCents('12345678901')).toThrow(); // 11 integer digits cannot fit numeric(12,2)
+  });
+  it('accepts the numeric(12,2) maximum', () => {
+    expect(toCents('9999999999.99')).toBe(999999999999);
   });
 });
 

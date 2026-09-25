@@ -46,19 +46,22 @@ async function enqueue(deps: Deps, jobId: string, chunks: ChunkRange[]): Promise
  * being in a splittable status, so a last-worker finalize racing concurrently with a split loses cleanly (0 rows
  * updated, nothing inserted, nothing enqueued) instead of being clobbered back to 'processing'.
  */
-export async function splitUpload(deps: Deps, input: { key: string }): Promise<{ jobId: string; totalChunks: number; contentLength: number } | null> {
+/** `contentLength` is null when the job had already finished and the object was not looked at. */
+export async function splitUpload(deps: Deps, input: { key: string }): Promise<{ jobId: string; totalChunks: number; contentLength: number | null } | null> {
   const jobId = jobIdFromKey(input.key);
   if (!jobId) { deps.logger.warn({ key: input.key }, 'ignoring object outside uploads/<jobId>/'); return null; }
   const [job] = await deps.db.select().from(ingestionJobs).where(eq(ingestionJobs.id, jobId));
   if (!job) { deps.logger.warn({ key: input.key, jobId }, 'no job for key; ignoring'); return null; }
 
-  const head = await deps.s3.send(new HeadObjectCommand({ Bucket: deps.config.s3Bucket, Key: input.key }));
-  const contentLength = head.ContentLength ?? 0;
-
+  // Checked before the HEAD: a redelivered event for a finished job must be a no-op even if the upload has
+  // since been deleted, rather than a NotFound that the event source would retry for nothing.
   if (job.status === 'completed' || job.status === 'failed') {
     deps.logger.info({ jobId, status: job.status }, 'job already finished; ignoring redelivered split event');
-    return { jobId, totalChunks: job.totalChunks, contentLength };
+    return { jobId, totalChunks: job.totalChunks, contentLength: null };
   }
+
+  const head = await deps.s3.send(new HeadObjectCommand({ Bucket: deps.config.s3Bucket, Key: input.key }));
+  const contentLength = head.ContentLength ?? 0;
 
   const chunks = computeChunks(contentLength, deps.config.chunkSizeBytes);
 

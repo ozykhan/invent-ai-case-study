@@ -1,4 +1,5 @@
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
+import { Readable } from 'node:stream';
 import { categories, computeChunks, ingestionChunks, ingestionJobs, ingestionRejections, keys, products } from '@modaco/core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { markChunkFailed } from '../src/job-state';
@@ -201,6 +202,86 @@ describe('processChunk', () => {
     expect(rejections).toHaveLength(3);
     expect(job!.rowsRejected).toBe(3);
     expect(rejections.length).toBe(job!.rowsRejected);
+  });
+
+  it('rejects an int4-overflowing stock and NUL-bearing rows without failing the chunk', async () => {
+    // Before validation bounded stock and rejected NUL, either row made Postgres abort the whole batch
+    // transaction (22003 / 22021) on every retry, dead-lettering the chunk and failing the job.
+    const body = [
+      'sku,name,category,vendor_price,stock',
+      'G1,Belt,Accessories,10.00,5',
+      'OVF,Boot,Shoes,50.00,3000000000',
+      'NUL1,Ha\u0000t,Accessories,5.00,1',
+      'G2,Scarf,Accessories,7.50,3',
+      'nul\u0000short',
+      'G3,Coat,Outerwear,100.00,1',
+    ].join('\n') + '\n';
+    const { jobId, chunks } = await prepare(body, 10_000);
+    const r = await processChunk(ctx.deps, { jobId, ...chunks[0]! });
+    expect(r).toMatchObject({ skipped: false, rowsProcessed: 3, rowsRejected: 3 });
+
+    const rows = await ctx.deps.db.select().from(products).orderBy(products.sku);
+    expect(rows.map((p) => p.sku)).toEqual(['G1', 'G2', 'G3']);
+
+    const rejections = await ctx.deps.db.select().from(ingestionRejections)
+      .where(eq(ingestionRejections.jobId, jobId)).orderBy(ingestionRejections.lineNumber);
+    expect(rejections.map((x) => [x.lineNumber, x.reason])).toEqual([
+      [2, expect.stringContaining('stock')],
+      [3, expect.stringMatching(/name.*NUL/)],
+      [5, expect.stringContaining('expected 5 fields')],
+    ]);
+    // NUL is stripped from the stored raw line (Postgres text cannot hold it); the rest is kept verbatim.
+    expect(rejections.map((x) => x.rawLine)).toEqual(['OVF,Boot,Shoes,50.00,3000000000', 'NUL1,Hat,Accessories,5.00,1', 'nulshort']);
+
+    const [job] = await ctx.deps.db.select().from(ingestionJobs).where(eq(ingestionJobs.id, jobId));
+    expect(job).toMatchObject({ status: 'completed', failedChunks: 0, rowsProcessed: 3, rowsRejected: 3 });
+  });
+
+  it('falls back to row-by-row writes when the database rejects a batch, rejecting only the offending row', async () => {
+    // Nothing that passes validation is known to be refused by Postgres any more, so a trigger stands in
+    // for "a row the database rejects": it raises check_violation (SQLSTATE 23514) for one SKU only.
+    await ctx.deps.db.execute(sql.raw(`
+      create or replace function test_poison_sku() returns trigger language plpgsql as $$
+      begin
+        if new.sku = 'POISON' then raise exception 'poisoned sku' using errcode = 'check_violation'; end if;
+        return new;
+      end $$;
+      create trigger test_poison_sku before insert or update on products for each row execute function test_poison_sku();
+    `));
+    try {
+      // UPSERT_BATCH_SIZE is 3 in this suite: P1, POISON and a malformed row share the first batch, so the
+      // batch's rejection insert rolls back with it and must be re-applied by the fallback too.
+      const body = 'sku,name,category,vendor_price,stock\nP1,Belt,Accessories,10.00,5\nPOISON,Hat,Accessories,20.00,1\nshort,row\nP2,Boot,Shoes,50.00,2\n';
+      const { jobId, chunks } = await prepare(body, 10_000);
+      const r = await processChunk(ctx.deps, { jobId, ...chunks[0]! });
+      expect(r).toMatchObject({ skipped: false, rowsProcessed: 2, rowsRejected: 2 });
+
+      const rows = await ctx.deps.db.select().from(products).orderBy(products.sku);
+      expect(rows.map((p) => p.sku)).toEqual(['P1', 'P2']);
+      const rejections = await ctx.deps.db.select().from(ingestionRejections)
+        .where(eq(ingestionRejections.jobId, jobId)).orderBy(ingestionRejections.lineNumber);
+      expect(rejections.map((x) => [x.lineNumber, x.reason])).toEqual([
+        [2, expect.stringMatching(/database.*23514.*poisoned sku/)],
+        [3, expect.stringContaining('expected 5 fields')],
+      ]);
+      const [job] = await ctx.deps.db.select().from(ingestionJobs).where(eq(ingestionJobs.id, jobId));
+      expect(job).toMatchObject({ status: 'completed', failedChunks: 0, rowsProcessed: 2, rowsRejected: 2 });
+      const p1 = rows.find((p) => p.sku === 'P1')!;
+      expect(await ctx.deps.redis.get(keys.stock(p1.id))).toBe('5');
+    } finally {
+      await ctx.deps.db.execute(sql.raw('drop trigger if exists test_poison_sku on products; drop function if exists test_poison_sku();'));
+    }
+  });
+
+  it('fails the chunk (for a retry) when S3 returns fewer bytes than its ContentLength', async () => {
+    // ownedLines cannot tell a truncated body from the end of the range: without the length check the
+    // cut-off tail would be priced as a complete line and every line after it silently dropped.
+    const { jobId, chunks } = await prepare('sku,name,category,vendor_price,stock\nS1,Belt,Accessories,10.00,5\n', 10_000);
+    const truncated = Buffer.from('sku,name,category,vendor_price,stock\nS1,Belt,Accessories,10.0');
+    const s3 = { send: async () => ({ Body: Readable.from([truncated]), ContentLength: truncated.length + 3 }) } as unknown as typeof ctx.deps.s3;
+    await expect(processChunk({ ...ctx.deps, s3 }, { jobId, ...chunks[0]! })).rejects.toThrow(/short read/);
+    expect(await ctx.deps.db.select().from(products)).toHaveLength(0);
+    expect(await ctx.deps.db.select().from(ingestionRejections)).toHaveLength(0);
   });
 
   it('markChunkFailed fails the job once and ignores completed chunks', async () => {
