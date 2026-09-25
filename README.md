@@ -128,7 +128,7 @@ Required parameters:
 - `DatabaseUrl`: Postgres connection string. In production point this at an **RDS Proxy** endpoint: each worker holds a pool of 2, and the proxy multiplexes Lambda connections onto a small set of database connections.
 - `RedisUrl`: Redis (e.g. ElastiCache) URL, used for version bumps and stock counters.
 
-Optional: `ChunkSizeBytes` (4194304), `UpsertBatchSize` (1000), `WorkerReservedConcurrency` (10). The template has no `VpcConfig`; if Postgres and Redis are in a VPC, add one to the functions. The API is not part of the template. To use the deployed bucket, set the API's `S3_BUCKET` to the stack's bucket name and both `AWS_ENDPOINT_URL` and `S3_PUBLIC_ENDPOINT` to the regional S3 endpoint (for example `https://s3.us-east-1.amazonaws.com`), because the API always uses an explicit endpoint.
+Optional: `ChunkSizeBytes` (4194304), `UpsertBatchSize` (1000), `WorkerReservedConcurrency` (10). The template has no `VpcConfig`; if Postgres and Redis are in a VPC, add one to the functions. The API is not part of the template. To use the deployed bucket, set the API's `S3_BUCKET` to the stack's bucket name and both `AWS_ENDPOINT_URL` and `S3_PUBLIC_ENDPOINT` to the regional S3 endpoint (for example `https://s3.us-east-1.amazonaws.com`), because the API always uses an explicit endpoint. The API also builds its S3 credentials from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (falling back to `test`, no session token; see `apps/api/src/deps.ts`), so a deployed API needs static access keys rather than an IAM role or temporary credentials (ADR §10).
 
 ## Layout
 

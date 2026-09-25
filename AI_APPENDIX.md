@@ -1,6 +1,6 @@
 # Form 5: AI Interaction Summary
 
-> Placeholders marked **[CANDIDATE]** are for the candidate to write in their own words. Everything else is drawn from the repository history, the design spec, the implementation plan and the per-task review ledger.
+> Sources: the design conversation with the AI (my messages are quoted verbatim below), the design spec and implementation plan under `docs/superpowers/`, and the commit history, which records every task and fix round. The per-task review notes are not part of the submission; the findings that were deferred rather than fixed are listed in ADR §10. **[CANDIDATE]** marks what I still have to write in my own words; **[CANDIDATE: confirm]** marks claims the record does not settle.
 
 ## 1. Tool Manifest
 
@@ -9,43 +9,54 @@
 | Claude Code (desktop app) running **Claude Fable 5.1** | Design phase: reading the case study and Form 5, question-by-question architecture brainstorming, the design spec (`docs/superpowers/specs/`), and the 17-task implementation plan (`docs/superpowers/plans/`) | **[CANDIDATE]** |
 | Claude Code running **Claude Opus 5.5** | Implementation phase: a controller session dispatching one implementer subagent and one reviewer subagent per plan task; demo runs; drafting README, ADR and this appendix | **[CANDIDATE]** |
 | Superpowers plugin skills (brainstorming, writing-plans, subagent-driven-development, test-driven-development, requesting-code-review) | Forced a one-question-at-a-time design phase, a written plan before any code, test-first implementation, and an independent review of every task | **[CANDIDATE]** |
-| Context7 MCP (library documentation) | Checked current Drizzle ORM syntax (check constraints, partial indexes, upserts) and the LocalStack S3-to-SQS notification setup before writing code | **[CANDIDATE]** |
+| Context7 MCP (library documentation) **[CANDIDATE: confirm it was used, or delete this row]** | Checking current Drizzle ORM and LocalStack documentation | **[CANDIDATE]** |
 
 ## 2. AI Tool Usage Approach
 
 | Phase / specific task | Prompting strategy and context provided | Human refinement (how I edited or iterated) |
 |---|---|---|
-| Requirements | Asked the AI to read the case study PDF and the Form 5 template first and summarize them before designing anything | Confirmed the summary, then answered design questions one at a time |
-| Architecture | For each decision the AI offered 2-3 options with trade-offs: serverless target, local-first with LocalStack, Postgres + Drizzle, read-time price + Redis, ingestion mechanism, conflict rule, pricing pipeline | Made every choice myself. Overrode the AI's recommendation on the conflict rule (chose most-recent-wins to keep scope down, rigorous option recorded in the ADR). Pushed back twice on the cache design (the two prompts below) |
-| Spec and plan | Had the AI write a design spec, review it against the case study, then write a task-by-task plan with exact code and tests written before implementation | Reviewed and approved the spec section by section. Rejected the first cache key scheme before the plan was written (see §3). The approved plan is what was executed |
-| Implementation | Subagent-driven development: for each of the 17 tasks a fresh implementer subagent received a task brief plus shared rules (see the failing test first, then implement, then commit). A separate reviewer subagent then checked the diff against the spec and plan and graded findings Critical / Important / Minor | Every fix to plan-mandated behavior needed my approval before a fix round was dispatched. I decided which minor findings to fold in and which to defer to a ledger (now ADR §10). Plan defects that would carry into later tasks were patched in the plan itself (3 plan patches). 8 of the 16 code tasks needed at least one fix round, 9 rounds in total |
-| Demos and measurements | Scripted demos for both scenarios; the AI ran them and reported numbers | The demo's own review found a flawed measurement (a cold-start confound, see §3); the numbers in the ADR come from the corrected rerun |
-| Documentation | The AI drafted the README, ADR and this appendix from the code, spec, review ledger and demo output, with the instruction that the code wins where they disagree | **[CANDIDATE]**: my edits to wording, ratings and reflection |
+| Requirements | The AI worked from the case study PDF and the Form 5 template **[CANDIDATE: confirm how they were provided and whether the AI summarized them first]** | Answered the AI's design questions one at a time |
+| Architecture | For each decision the AI offered numbered options with trade-offs | I chose each one. Stack: "aws lambda with sqs and s3", "local-first with localstack", "postgresql with drizzle". Price and cache: "compute at read time with redis", with the stock question attached (prompt 1 below). Invalidation: prompt 2 below. Ingestion: "byte-range fan-out, yes presigned upload is fine". Conflict rule: "go with option 3 since its simpler and we are doing a case study" (most recent wins; the rigorous options are recorded in ADR §7) **[CANDIDATE: confirm whether this differed from the AI's recommendation]**. Pricing: "go with option 1" (deterministic pipeline) |
+| Spec | The AI wrote the design spec section by section | I approved each section in turn: data model, API, ingestion flow, error handling and testing |
+| Plan | The AI wrote a 17-task plan with exact code and tests to write before implementation, and self-reviewed it | While planning, the AI itself caught two flaws in its own design: the cache key could not be built on a cold read, and the chunk-boundary rule dropped lines (see §3). The approved plan is what was executed |
+| Implementation | Subagent-driven development in a git worktree (my choice of workflow). A controller session gave each of the 17 tasks to a fresh implementer subagent (task brief plus shared rules: see the failing test first, then implement, then commit). A separate reviewer subagent checked each diff against the spec and plan and graded findings Critical / Important / Minor | The controller asked me before fixing any plan-mandated behavior (Tasks 5, 8, 10, 12, 13, 14) and I approved each fix. In Tasks 8, 10, 12, 13 and 14 I also chose to fold in the cheap minor findings. I decided to publish Postgres on host port 5433. On its own, the controller patched the plan twice (the drizzle error-code fix, and carrying the approved ioredis pipeline fix into later tasks), ran the Task 15 and 16 fix rounds (not plan-mandated), and deferred all other minor findings (the material ones are in ADR §10). 8 of the 16 code tasks needed at least one fix round, 9 rounds in total (see the `fix(...)` commits) |
+| Demos and measurements | Scripted demos for both scenarios; the AI ran them and reported numbers | The review of the demo task found a flawed measurement (a cold-start confound, see §3). The numbers in the ADR come from the corrected rerun |
+| Documentation | The AI drafted the README, ADR and this appendix from the code, spec, plan, its implementation notes and the demo output, with the instruction that the code wins where they disagree | **[CANDIDATE]**: my edits to wording, ratings and reflection |
 
 **The two most critical prompts:**
 
 1. "compute at read time with redis (but make sure that we can actually cache it, products have stock quantity can we safely cache that?)"
-2. "what happens when we release a promo, unit prices change on the backend but cached responses will return old prices. Shall we add an invalidation logic or something else?"
+2. "what happens when we release a promo, unit prices changes on the backend but we cached responses will return old prices. Shall we add an invalidation logic or something else?"
 
-The first forced stock out of the catalog cache. The second produced the version-counter invalidation that the whole Scenario B answer rests on.
+The first kept stock out of the catalog cache. The second led to the version-counter invalidation that the whole Scenario B answer rests on.
 
 ## 3. Judgement, Challenges and Verification
 
-**Biggest architectural/logical mistake** **[CANDIDATE: confirm or replace]**. The AI's first chunk-alignment rule for Scenario A: "when `byteStart > 0`, discard everything up to the first newline." It looks right and passes a casual test. But when a chunk boundary falls exactly after a newline, the line starting at `byteStart` belongs to this chunk, and the rule throws it away. The previous chunk stops at its own end, so no chunk processes that line. That is silent data loss that depends on where the byte offsets happen to fall. It was corrected to "a chunk owns the lines whose first byte is inside its range; read one byte early to see the preceding character", and a property test now checks exactly-once delivery across many chunk sizes, including that boundary case.
+**Biggest architectural/logical mistake** **[CANDIDATE: choose, and say who caught it]**. The record gives two candidates:
+
+- *Caught by me:* the cache design had to answer two questions I raised before it was written: whether stock could be cached at all (prompt 1), and what happens to cached prices when a promotion is released (prompt 2). Stock is therefore never in a cached entry, and one counter increment invalidates every affected entry the moment a promotion is written.
+- *Caught by the AI during planning:* the first chunk-alignment rule for Scenario A, "when `byteStart > 0`, discard everything up to the first newline". When a chunk boundary falls exactly after a newline, the line starting at `byteStart` belongs to this chunk and the rule throws it away. The previous chunk stops at its own end, so no chunk processes the line: silent data loss that depends on where the byte offsets happen to fall. The AI found this while planning and replaced it with "a chunk owns the lines whose first byte is inside its range; read one byte early to see the preceding character". A property test checks exactly-once delivery across many chunk sizes, including that boundary.
 
 ### Design phase
 
 | Challenge encountered | Judgement / verification | Resolution |
 |---|---|---|
-| The first cache design cached the whole product row, including stock, under a long TTL | Stock changes on every sale; a cached value would be wrong for the whole TTL | Split the cache: catalog and price entry with a long TTL; stock read live from a Redis counter with a Postgres fallback |
-| The spec keyed the product cache as `product:{id}:v{pv}:c{cv}` | The API cannot know a product's category, and so its category version, before reading the product. The key could never be built on a cold read | Store the versions inside the cached value and validate them on read. Same invalidation, two round trips when warm |
-| Chunk alignment: "discard up to the first newline when `byteStart > 0`" | Walked through a boundary that falls exactly after a newline: a full, owned line is discarded and no chunk processes it | Ownership by first byte, one byte read early, and a property test over many chunk sizes (above) |
-| Promotions with a future start change prices with no write to trigger invalidation | A scheduler adds an operational component and a race | Cap each entry's TTL at the next promotion boundary, computed from the promotions table |
+| Whether a product with a stock quantity can be cached at all | Raised by me (prompt 1). Stock changes on every sale, so a cached value would be wrong for the whole TTL | Split the cache: catalog and price entry with a long TTL; stock read live from a Redis counter with a Postgres fallback |
+| Cached responses keep returning old prices after a promotion is released | Raised by me (prompt 2) | Version counters bumped after each promotion write and checked on every read (ADR §4) |
+| The spec keyed the product cache as `product:{id}:v{pv}:c{cv}` | Caught by the AI during planning: the API cannot know a product's category, and so its category version, before reading the product, so the key could never be built on a cold read | Store the versions inside the cached value and validate them on read. Same invalidation, two round trips when warm. The spec was amended in the plan commit (`e4e6d28`) |
+| Chunk alignment: "discard up to the first newline when `byteStart > 0`" | Caught by the AI during planning, by walking through a boundary that falls exactly after a newline | Ownership by first byte, one byte read early, and a property test over many chunk sizes (above) |
+| Promotions with a future start change prices with no write to trigger invalidation | A scheduler adds an operational component and a race **[CANDIDATE: confirm who raised this]** | Cap each entry's TTL at the next promotion boundary, computed from the promotions table |
 | Multi-row upsert with duplicate SKUs in one batch | Postgres raises "ON CONFLICT DO UPDATE command cannot affect row a second time" | Dedupe by SKU within a batch, last occurrence wins; covered by a test |
 
 ### Implementation phase (plan defects caught by tests and per-task review)
 
-All of these were in the approved plan's own code, not implementer slips. Each fix was approved by me before it was made.
+All of these were in the approved plan's own code, not implementer slips. They were caught by the implementer's failing tests or by the reviewer subagent. Who decided each fix:
+
+- **I approved them.** The controller asked me before changing plan-mandated behavior: the Redis rows (Task 5), the read-path rows (Task 8), cancel/assign (Task 10), the splitter (Task 12), completion, rejections and SKU moves (Task 13), and the runner and SAM rows (Task 14).
+- **The controller decided alone:**
+  - the drizzle row, applied as a plan patch (`7a1c0a2`);
+  - the plan patch carrying the approved ioredis fix into Tasks 8 and 13 (`0b09769`);
+  - the last two rows (Tasks 15 and 16), which were not plan-mandated.
 
 | Challenge encountered | Judgement / verification | Resolution |
 |---|---|---|

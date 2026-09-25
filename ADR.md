@@ -34,7 +34,7 @@ Where a simpler and a more rigorous option existed, this project took the simple
 - **Drizzle ORM.** The schema and migrations are typed, and SQL stays visible where it matters. The effective-price expression is one SQL fragment (`effectivePriceExpr` in `packages/core/src/products/queries.ts`) used by the listing projection, the listing sort and the detail query, so the three cannot disagree. `schema.sql` is generated from the committed migrations.
 - **Redis.** It holds three things: version counters (`INCR`), cached catalog entries, and live stock counters. The client fails fast (300 ms command timeout, no offline queue), so an unreachable Redis costs a read at most a few hundred milliseconds before it falls through to Postgres.
 - **AWS Lambda, S3, SQS.** Lambda is the consumption plan. S3 with presigned uploads keeps 30+ MB files out of the API. SQS gives at-least-once delivery, visibility-timeout retries and a dead-letter queue without writing any of that ourselves.
-- **LocalStack.** A reviewer can run the whole pipeline (S3 notification, SQS, redrive to the DLQ) with `docker compose up`. A local runner stands in for the Lambda service (§6.5). The same handler code is bundled with esbuild and deployed through `infra/template.yaml` (SAM).
+- **LocalStack.** A reviewer can run the whole pipeline (S3 notification, SQS, redrive to the DLQ) locally: `docker compose up` starts the infrastructure, and the API and runner run either with `pnpm dev:api` / `pnpm dev:runner` or in containers with `docker compose --profile app up`. A local runner stands in for the Lambda service (§6.5). The same handler code is bundled with esbuild and deployed through `infra/template.yaml` (SAM).
 
 ## 3. Effective price is computed at read time, never stored
 
@@ -65,7 +65,7 @@ Where a simpler and a more rigorous option existed, this project took the simple
 - **Coalescing.** On a miss, one reader takes `lock:{key}` (`SET NX PX 2000`) and rebuilds. The others poll for 200 ms, then query Postgres directly without writing the cache.
 - **Degradation.** Every Redis failure on the read path is logged and falls through to Postgres. An entry built while a version read failed is served but not cached. Stock falls back to the Postgres column. No read endpoint fails because of Redis.
 
-**Consequences.** One `INCR` invalidates any number of entries, and stale entries are overwritten in place instead of leaving orphans. The cost is one extra lookup per read, a window of up to about 200 ms during which waiting readers go to Postgres, and a stale window of at most 5 minutes if Redis loses a bump. Because `ver:all` moves with every category change, the all-products listing is invalidated by any change anywhere, including every ingestion batch.
+**Consequences.** One `INCR` invalidates any number of entries, and stale entries are overwritten in place instead of leaving orphans. The cost is one extra lookup per read, up to 200 ms of added latency for readers that wait on a rebuild (they poll Redis for the new entry and query Postgres only if it has not appeared by then), and a stale window of at most 5 minutes if Redis loses a bump. Because `ver:all` moves with every category change, the all-products listing is invalidated by any change anywhere, including every ingestion batch.
 
 **Rejected.**
 - *Delete by pattern.* `SCAN` plus `DEL` over 50k+ keys on every promotion write is slow and not atomic: readers repopulate keys while the scan runs.
@@ -152,7 +152,7 @@ What the runner does not simulate: container reuse (every local invocation is a 
 - **9 chunks** of 4 MiB (8 full plus a 24 KB remainder), **0 chunk failures**.
 - **7.4 s end to end**, measured from job creation to the job reading `completed` (0.3 s of that was the upload, and status was polled every second), which is **about 67.5k rows/s**.
 - **499,479 rows upserted, 521 rejected** with reasons (`rowsProcessed + rowsRejected = 500,000`).
-- All 9 chunks ran in parallel. A full chunk (about 62k rows) took 6 to 7 s including process start-up, about a tenth of the 60 s timeout.
+- All 9 chunks ran in parallel. A full chunk (about 62k rows) took roughly 5 to 7 s including process start-up, about a tenth of the 60 s timeout. This was not measured per chunk; it is bounded by the demo's 1 s status polling.
 
 These are **local laptop numbers against LocalStack and a Docker Postgres, not AWS**. Real Lambda adds network latency to S3 and RDS and, at 10 workers, contention on a managed database. Peak worker memory was not measured; the bound comes from the design (one batch in memory), and the local heap cap was never hit.
 
@@ -207,3 +207,4 @@ Material items the per-task reviews deferred, plus one found while writing this 
 - **Stock counter ordering.** `PATCH /products/:id/stock` writes Postgres and then `SET`s the counter to the returned value. Two concurrent patches can reach Redis out of order, leaving the counter off until the next stock write or its 24 h TTL. Fix: apply the delta with `INCRBY`, or guard the `SET` with a version.
 - **The lock is released with an unconditional `DEL`.** If a rebuild outlives the 2 s lock, it can release another reader's lock. The only effect is an extra rebuild.
 - **The SAM template has no `VpcConfig`**, and the API is not part of the template.
+- **The API's S3 clients use static credentials.** `apps/api/src/deps.ts` builds them from `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, with a `test` fallback and no session token, instead of the SDK's default provider chain. A deployed API therefore needs long-lived static keys and cannot use an IAM role. Fix: use the default chain when no endpoint override is set, as `apps/ingest/src/aws.ts` already does.
