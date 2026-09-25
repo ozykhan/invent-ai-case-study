@@ -1,0 +1,94 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: ModaCo vendor ingestion (splitter, chunk worker, dead-letter handler)
+
+Parameters:
+  DatabaseUrl: { Type: String, NoEcho: true }
+  RedisUrl: { Type: String, NoEcho: true }
+  ChunkSizeBytes: { Type: Number, Default: 4194304 }
+  UpsertBatchSize: { Type: Number, Default: 1000 }
+  WorkerReservedConcurrency: { Type: Number, Default: 10 }
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures: [arm64]
+    MemorySize: 256
+    CodeUri: ../apps/ingest/dist
+    Environment:
+      Variables:
+        DATABASE_URL: !Ref DatabaseUrl
+        REDIS_URL: !Ref RedisUrl
+        S3_BUCKET: !Sub '${AWS::StackName}-vendor-uploads'
+        CHUNK_SIZE_BYTES: !Ref ChunkSizeBytes
+        UPSERT_BATCH_SIZE: !Ref UpsertBatchSize
+        CHUNK_QUEUE_URL: !Ref ChunkQueue
+
+Resources:
+  UploadsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-vendor-uploads'
+
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+
+  ChunkQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 360
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  SplitterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: lambda.splitter
+      Timeout: 30
+      Policies:
+        - S3ReadPolicy: { BucketName: !Sub '${AWS::StackName}-vendor-uploads' }
+        - SQSSendMessagePolicy: { QueueName: !GetAtt ChunkQueue.QueueName }
+      Events:
+        Upload:
+          Type: S3
+          Properties:
+            Bucket: !Ref UploadsBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules: [{ Name: prefix, Value: uploads/ }]
+
+  WorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: lambda.worker
+      Timeout: 60
+      ReservedConcurrentExecutions: !Ref WorkerReservedConcurrency
+      Policies:
+        - S3ReadPolicy: { BucketName: !Sub '${AWS::StackName}-vendor-uploads' }
+      Events:
+        Chunks:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ChunkQueue.Arn
+            BatchSize: 1
+
+  DeadLetterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: lambda.deadLetter
+      Timeout: 30
+      Events:
+        Dead:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt DeadLetterQueue.Arn
+            BatchSize: 1
+
+Outputs:
+  UploadsBucketName: { Value: !Ref UploadsBucket }
+  ChunkQueueUrl: { Value: !Ref ChunkQueue }
+  DeadLetterQueueUrl: { Value: !Ref DeadLetterQueue }
