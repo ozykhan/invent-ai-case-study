@@ -27,6 +27,7 @@ Where a simpler and a more rigorous option existed, this project took the simple
 | Line ownership | First byte decides the owning chunk (§6.2) | Splitter pre-scans for newline offsets | Never; the pre-scan reintroduces file-size-bound splitter time |
 | Worker batching | SQS batch size 1 (§6.4) | Batch size > 1 with partial batch responses | Invocation count or cost matters more than retry granularity |
 | Connection pooling | Pool of 2 per worker, reserved concurrency 10 | RDS Proxy in front of Postgres | Any production deployment |
+| Local load balancing | nginx round-robin over Compose replicas, DNS resolved at startup (§11) | AWS ALB over ECS tasks, or nginx with a `resolver` that re-resolves | Replicas change while nginx runs, or tests move to AWS |
 
 ## 2. Stack: PostgreSQL + Drizzle, Redis, AWS Lambda/S3/SQS, LocalStack
 
@@ -210,3 +211,19 @@ Material items the per-task reviews deferred, plus one found while writing this 
 - **The lock is released with an unconditional `DEL`.** If a rebuild outlives the 2 s lock, it can release another reader's lock. The only effect is an extra rebuild.
 - **The SAM template has no `VpcConfig`**, and the API is not part of the template.
 - **The API's S3 client uses static credentials.** The API has one S3 client, the presigner. `apps/api/src/deps.ts` builds it from `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, with a `test` fallback and no session token, instead of the SDK's default provider chain. A deployed API therefore needs long-lived static keys and cannot use an IAM role. Fix: use the default chain outside local development, as `apps/ingest/src/aws.ts` already does.
+
+## 11. Horizontal scaling: 1 vs 4 replicas behind nginx
+
+**Setup.** Measured on 2026-09-25 with the `lb` Compose profile: N `api-lb` replicas, each limited to 1 CPU (`API_CPUS`) and holding a Postgres pool of 10, behind nginx on `:8080` (round-robin, upstream keepalive). The database held the seed data only (200 products, 4 categories), not the 500k-row ingest from §5. The load came from `pnpm modaco --url http://localhost:8080 load browse --concurrency 100 --duration 20s`: 100 workers in a closed loop, a 5 s unrecorded warm-up, then 20 s recorded. Requests were 70% listings (pages 1 to 5, 20 items each) and 30% product details. The full result documents are in [`docs/load-tests/2026-09-25/`](docs/load-tests/2026-09-25/).
+
+| Replicas | Requests | req/s | p50 | p90 | p95 | p99 | Errors |
+|---|---|---|---|---|---|---|---|
+| 1 | 113,833 | 5,691.7 | 3.36 ms | 9.54 ms | 207.23 ms | 219.01 ms | 0 |
+| 4 | 161,247 | 8,062.4 | 1.63 ms | 4.88 ms | 201.47 ms | 206.59 ms | 0 |
+
+- **Throughput rose 1.42×, not 4×.** The replicas, Postgres, Redis, nginx and the load generator all shared one Mac's CPUs through Docker Desktop, so adding replicas moved the bottleneck rather than removing it. We did not profile which component saturated first (`docker stats` was not captured during the runs). This shows that the stack scales out and that the balancer spreads load. It does not show what four separate hosts would do.
+- **nginx spread requests evenly.** The 4-replica run split 40,312 / 40,311 / 40,311 / 40,313 across the four `X-Instance-Id` values, within 2 requests of an exact quarter. With 1 replica, every response came from a single instance.
+- **Median and p90 latency halved** (3.36 to 1.63 ms and 9.54 to 4.88 ms). Product details improved the most: p99 went from 10.54 to 5.15 ms.
+- **The tail is bimodal and did not improve.** About 5% of requests took about 200 ms in both runs, while p90 stayed under 10 ms. Every one of those slow requests is a listing: detail p99 stayed under 11 ms. The step sits right at the 200 ms that a cache reader waits for another reader's rebuild before querying Postgres itself (`waitMs` in `packages/core/src/cache/read-through.ts`, §5). That suggests list-page readers regularly hit the rebuild-wait path even without writes, but we have not checked it. If confirmed, the serve-stale-while-revalidate change in §9 would remove this tail. This is the first thing to investigate before trusting any tail numbers from load tests.
+- **What was also checked end to end.** Against a single API: `browse`, `write-mix` and `flash-sale` ran with no transport errors, and the flash-sale mid-sale check passed. A `write-mix` run interrupted with Ctrl-C printed a partial report, exited 130, and left 0 uncancelled promotions.
+- **Limits of the local setup.** About 9 replicas fit before the per-replica pools exhaust Postgres's default `max_connections` of 100. nginx resolves the replica list at startup, so it has to be restarted after rescaling. Both are in the README; on AWS an ALB and RDS Proxy remove them.

@@ -1,0 +1,87 @@
+{
+  "scenario": "browse",
+  "target": "http://localhost:8080",
+  "startedAt": "2026-09-25T13:39:00.437Z",
+  "options": {
+    "model": "closed",
+    "concurrency": 100,
+    "durationMs": 20000,
+    "warmupMs": 5000,
+    "connections": 100,
+    "timeoutMs": 10000,
+    "seed": 1584962667,
+    "maxPage": 5
+  },
+  "phases": [
+    {
+      "name": "main",
+      "elapsedSeconds": 20,
+      "total": {
+        "count": 161247,
+        "rps": 8062.4,
+        "latencyMs": {
+          "mean": 12.45,
+          "p50": 1.63,
+          "p90": 4.88,
+          "p95": 201.47,
+          "p99": 206.59,
+          "p999": 214.14,
+          "max": 232.84
+        },
+        "status": {
+          "200": 161247
+        },
+        "errors": {},
+        "dropped": 0
+      },
+      "byLabel": {
+        "detail": {
+          "count": 48030,
+          "rps": 2401.5,
+          "latencyMs": {
+            "mean": 1.4,
+            "p50": 1.1,
+            "p90": 2.55,
+            "p95": 3.29,
+            "p99": 5.15,
+            "p999": 10.21,
+            "max": 23.48
+          },
+          "status": {
+            "200": 48030
+          },
+          "errors": {},
+          "dropped": 0
+        },
+        "list": {
+          "count": 113217,
+          "rps": 5660.9,
+          "latencyMs": {
+            "mean": 17.14,
+            "p50": 1.96,
+            "p90": 6.67,
+            "p95": 203.26,
+            "p99": 207.49,
+            "p999": 216.19,
+            "max": 232.84
+          },
+          "status": {
+            "200": 113217
+          },
+          "errors": {},
+          "dropped": 0
+        }
+      }
+    }
+  ],
+  "instances": {
+    "001a73a1976c": 40312,
+    "3fbb0579d382": 40311,
+    "c7865bf331b1": 40311,
+    "d9574e4650df": 40313
+  },
+  "checks": [],
+  "notes": {},
+  "interrupted": false,
+  "ok": true
+}
