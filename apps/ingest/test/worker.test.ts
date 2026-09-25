@@ -136,6 +136,35 @@ describe('processChunk', () => {
     expect(chunk!.error).toContain('header');
   });
 
+  it('accepts a UTF-8 BOM-prefixed header (Excel "CSV UTF-8" exports)', async () => {
+    const body = '﻿sku,name,category,vendor_price,stock\nS3,Boot,Shoes,50.00,2\n';
+    const { jobId, chunks } = await prepare(body, 10_000);
+    const r = await processChunk(ctx.deps, { jobId, ...chunks[0]! });
+    expect(r).toMatchObject({ skipped: false, rowsProcessed: 1, rowsRejected: 0 });
+    const [boot] = await ctx.deps.db.select().from(products).where(eq(products.sku, 'S3'));
+    expect(boot).toMatchObject({ name: 'Boot', basePrice: '65.99', stock: 2 }); // 50 * 1.3 = 65.00 -> 65.99
+  });
+
+  it('is a no-op when the chunk is already marked failed (e.g. a DLQ redrive)', async () => {
+    const { jobId, chunks } = await prepare(csv, 10_000); // a single chunk
+    await ctx.deps.db.update(ingestionChunks).set({ status: 'failed', error: 'dead-lettered', attempts: 3 }).where(eq(ingestionChunks.jobId, jobId));
+    await ctx.deps.db.update(ingestionJobs).set({ status: 'failed', failedChunks: 1 }).where(eq(ingestionJobs.id, jobId));
+
+    const r = await processChunk(ctx.deps, { jobId, ...chunks[0]! });
+    expect(r.skipped).toBe(true);
+
+    // The chunk must stay exactly as the DLQ redrive found it: no reprocessing, no cleared error.
+    const [chunk] = await ctx.deps.db.select().from(ingestionChunks).where(eq(ingestionChunks.jobId, jobId));
+    expect(chunk).toMatchObject({ status: 'failed', error: 'dead-lettered', attempts: 3 });
+
+    // The job's counters must be untouched: this delivery must never reach markChunkCompleted.
+    const [job] = await ctx.deps.db.select().from(ingestionJobs).where(eq(ingestionJobs.id, jobId));
+    expect(job).toMatchObject({ status: 'failed', failedChunks: 1, completedChunks: 0, rowsProcessed: 0, rowsRejected: 0 });
+
+    expect(await ctx.deps.db.select().from(products)).toHaveLength(0);
+    expect(await ctx.deps.db.select().from(ingestionRejections).where(eq(ingestionRejections.jobId, jobId))).toHaveLength(0);
+  });
+
   it('is safe against two concurrent deliveries of the same not-yet-completed chunk', async () => {
     const { jobId, chunks } = await prepare(csv, 10_000); // a single chunk
     const [a, b] = await Promise.all([

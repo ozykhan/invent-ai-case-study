@@ -1,5 +1,5 @@
 import { GetObjectCommand } from '@aws-sdk/client-s3';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, notInArray, sql } from 'drizzle-orm';
 import type { Readable } from 'node:stream';
 import {
   bumpVersions, categories, categoryPricingFromRow, DEFAULT_CATEGORY_PRICING, fromCents, ingestionChunks, ingestionJobs,
@@ -141,10 +141,13 @@ class BatchWriter {
 
 /**
  * Processes exactly one byte-range chunk: streams it from S3, prices every owned line, upserts in batches,
- * then records completion. Idempotent: a redelivered message for a chunk already marked completed exits
- * immediately (the fast path below), and a genuine race between two concurrent deliveries of the same
- * not-yet-completed chunk is resolved by markChunkCompleted's atomic guard, so job counters are only ever
- * incremented once per chunk.
+ * then records completion. Idempotent: a redelivered message for a chunk already finalized (completed, or
+ * failed/dead-lettered) is skipped without doing any work — the fast path below covers the common
+ * already-'completed' case without a write, and the guarded claim step covers everything else: a DLQ
+ * redrive of an already-'failed' chunk, and a race where a concurrent delivery finalizes the chunk between
+ * this delivery's initial read and its own claim attempt. Because a finalized chunk can never be
+ * re-claimed, and a genuine race between two concurrent deliveries of the same not-yet-finalized chunk is
+ * resolved by markChunkCompleted's own atomic guard, job counters are only ever incremented once per chunk.
  */
 export async function processChunk(deps: Deps, msg: ChunkMessage): Promise<{ skipped: boolean; rowsProcessed: number; rowsRejected: number }> {
   const [chunk] = await deps.db.select().from(ingestionChunks)
@@ -154,9 +157,20 @@ export async function processChunk(deps: Deps, msg: ChunkMessage): Promise<{ ski
   const [job] = await deps.db.select().from(ingestionJobs).where(eq(ingestionJobs.id, msg.jobId));
   if (!job) throw new Error(`job ${msg.jobId} not found`);
 
-  await deps.db.update(ingestionChunks)
+  // Claim the chunk, but only if it isn't already finalized. An unconditional write here would let a DLQ
+  // redrive of an already-'failed' chunk (whose error/attempts still needs to be visible, not silently
+  // cleared) flip it back to 'processing' and reprocess it — double-counting it once markChunkCompleted's
+  // own guard sees a non-terminal status again. It would equally let a delivery that lost a completion race
+  // (the other side already committed markChunkCompleted while this delivery was mid-read) reset the row
+  // from 'completed' back to 'processing' and reprocess it a second time.
+  const [claimed] = await deps.db.update(ingestionChunks)
     .set({ status: 'processing', attempts: sql`${ingestionChunks.attempts} + 1`, updatedAt: new Date() })
-    .where(eq(ingestionChunks.id, chunk.id));
+    .where(and(eq(ingestionChunks.id, chunk.id), notInArray(ingestionChunks.status, ['completed', 'failed'])))
+    .returning({ id: ingestionChunks.id });
+  if (!claimed) {
+    const [current] = await deps.db.select().from(ingestionChunks).where(eq(ingestionChunks.id, chunk.id));
+    return { skipped: true, rowsProcessed: current?.rowsProcessed ?? chunk.rowsProcessed, rowsRejected: current?.rowsRejected ?? chunk.rowsRejected };
+  }
 
   const writer = new BatchWriter(deps.db, deps.redis, deps.logger, msg.jobId, msg.chunkIndex, deps.config.upsertBatchSize);
   try {
@@ -169,7 +183,10 @@ export async function processChunk(deps: Deps, msg: ChunkMessage): Promise<{ ski
     for await (const { line } of ownedLines(body, chunk, rangeStart)) {
       if (skipHeader) {
         skipHeader = false;
-        const header = parseCsvLine(line);
+        // Excel's "CSV UTF-8" export prefixes the file with a UTF-8 BOM, which decodes to a leading
+        // U+FEFF character on the first field of the header line; strip it (and tolerate incidental
+        // whitespace around header names) before comparing.
+        const header = parseCsvLine(line.replace(/^\uFEFF/, '')).map((h) => h.trim());
         const matches = header.length === VENDOR_COLUMNS.length && VENDOR_COLUMNS.every((col, i) => header[i] === col);
         if (!matches) throw new Error(`unexpected header row: expected "${VENDOR_COLUMNS.join(',')}", got "${line}"`);
         continue;
