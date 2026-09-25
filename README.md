@@ -152,6 +152,7 @@ pnpm modaco --url http://localhost:8080 load browse --rate 2000/s --duration 60s
 - Each replica holds a Postgres pool of 10 and Postgres allows 100 connections by default, so up to about 9 replicas fit. More need `max_connections` raised or a pooler (PgBouncer; RDS Proxy on AWS).
 - Postgres, Redis, nginx, the replicas and the load generator share this machine's CPUs. Local runs compare configurations (1 vs N replicas); they do not predict production capacity.
 - Stop the replicas with `docker compose --profile lb stop api-lb nginx`.
+- Measured on a Mac (Docker Desktop, shared host CPUs), `load browse --concurrency 100 --duration 20s`: 1 replica 5691.7 req/s (p99 219.0ms) vs 4 replicas 8062.4 req/s (p99 206.6ms), each replica serving ~25% of requests.
 
 ## Tests
 
