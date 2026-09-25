@@ -1,0 +1,111 @@
+{
+  "scenario": "browse",
+  "target": "http://localhost:8080",
+  "startedAt": "2026-09-25T19:05:02.585Z",
+  "options": {
+    "model": "open",
+    "rate": 4900,
+    "rampMs": 0,
+    "maxInflight": 10000,
+    "durationMs": 60000,
+    "warmupMs": 0,
+    "connections": 10000,
+    "timeoutMs": 10000,
+    "seed": 42,
+    "maxPage": 5,
+    "maxErrorRate": 0
+  },
+  "phases": [
+    {
+      "name": "main",
+      "elapsedSeconds": 60,
+      "total": {
+        "count": 55078,
+        "rps": 918,
+        "latencyMs": {
+          "mean": 377.32,
+          "p50": 56.99,
+          "p90": 560.13,
+          "p95": 2073.6,
+          "p99": 6221.82,
+          "p999": 8953.86,
+          "max": 10288.76
+        },
+        "status": {
+          "200": 55078,
+          "503": 135214
+        },
+        "errors": {
+          "serverError": 135214,
+          "ECONNRESET": 29,
+          "timeout": 97
+        },
+        "dropped": 103583
+      },
+      "byLabel": {
+        "detail": {
+          "count": 5803,
+          "rps": 96.7,
+          "latencyMs": {
+            "mean": 1200.84,
+            "p50": 93.5,
+            "p90": 5447.68,
+            "p95": 6283.26,
+            "p99": 8347.65,
+            "p999": 9723.9,
+            "max": 9927.23
+          },
+          "status": {
+            "200": 5803,
+            "503": 51153
+          },
+          "errors": {
+            "serverError": 51153,
+            "ECONNRESET": 7,
+            "timeout": 20
+          },
+          "dropped": 31075
+        },
+        "list": {
+          "count": 49275,
+          "rps": 821.3,
+          "latencyMs": {
+            "mean": 280.33,
+            "p50": 54.37,
+            "p90": 475.9,
+            "p95": 937.98,
+            "p99": 4976.64,
+            "p999": 8171.52,
+            "max": 10288.76
+          },
+          "status": {
+            "200": 49275,
+            "503": 84061
+          },
+          "errors": {
+            "serverError": 84061,
+            "ECONNRESET": 22,
+            "timeout": 77
+          },
+          "dropped": 72508
+        }
+      }
+    }
+  ],
+  "instances": {
+    "13cc6bb3168d": 47578,
+    "522a04e5dca3": 47576,
+    "992f50a55489": 47567,
+    "a66ec670a10f": 47571
+  },
+  "checks": [
+    {
+      "name": "error rate",
+      "ok": false,
+      "message": "71.08% (135340 of 190418) > --max-error-rate 0.00%"
+    }
+  ],
+  "notes": {},
+  "interrupted": false,
+  "ok": false
+}

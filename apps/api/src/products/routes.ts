@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import type { AppDeps } from '../deps';
 import { notFound } from '../errors';
+import { clientSignal } from '../middleware/client-abort';
 import { input, validate } from '../middleware/validate';
 import { createProductBody, idParam, listQuery, stockBody, type CreateProductBody, type ListQuery, type StockBody } from './schemas';
 import { ProductService } from './service';
@@ -11,12 +12,12 @@ export function productRoutes(deps: AppDeps): Router {
 
   r.get('/products', validate({ query: listQuery }), async (_req, res) => {
     const { query } = input<unknown, ListQuery>(res);
-    res.json(await service.listProducts(query));
+    res.json(await service.listProducts(query, clientSignal(res)));
   });
 
   r.get('/products/:id', validate({ params: idParam }), async (_req, res) => {
     const { params } = input<unknown, unknown, { id: number }>(res);
-    const item = await service.getProduct(params.id);
+    const item = await service.getProduct(params.id, clientSignal(res));
     if (!item) throw notFound(`product ${params.id} not found`);
     res.json(item);
   });

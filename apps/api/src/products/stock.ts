@@ -1,8 +1,9 @@
 import { fetchStock, keys, STOCK_TTL_SECONDS, throwOnPipelineError } from '@modaco/core';
 import type { AppDeps } from '../deps';
+import { throwIfClientGone } from '../middleware/client-abort';
 
 /** Redis counters first, Postgres for misses, empty counters backfilled. Redis failure means Postgres only. */
-export async function loadStocks(deps: AppDeps, ids: number[]): Promise<Map<number, number>> {
+export async function loadStocks(deps: AppDeps, ids: number[], signal?: AbortSignal): Promise<Map<number, number>> {
   const out = new Map<number, number>();
   if (ids.length === 0) return out;
   let missing = ids;
@@ -20,6 +21,7 @@ export async function loadStocks(deps: AppDeps, ids: number[]): Promise<Map<numb
     }
   }
   if (missing.length > 0) {
+    throwIfClientGone(signal);
     const fromDb = await fetchStock(deps.db, missing);
     for (const [id, stock] of fromDb) out.set(id, stock);
     if (deps.redis && fromDb.size > 0) {

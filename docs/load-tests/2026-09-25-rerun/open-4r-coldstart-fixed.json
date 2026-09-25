@@ -1,0 +1,108 @@
+{
+  "scenario": "browse",
+  "target": "http://localhost:8080",
+  "startedAt": "2026-09-25T19:17:15.200Z",
+  "options": {
+    "model": "open",
+    "rate": 4900,
+    "rampMs": 0,
+    "maxInflight": 10000,
+    "durationMs": 60000,
+    "warmupMs": 0,
+    "connections": 10000,
+    "timeoutMs": 10000,
+    "seed": 42,
+    "maxPage": 5,
+    "maxErrorRate": 0
+  },
+  "phases": [
+    {
+      "name": "main",
+      "elapsedSeconds": 60,
+      "total": {
+        "count": 256131,
+        "rps": 4268.9,
+        "latencyMs": {
+          "mean": 236.42,
+          "p50": 1.05,
+          "p90": 119.87,
+          "p95": 1901.57,
+          "p99": 5378.05,
+          "p999": 7389.18,
+          "max": 10827.14
+        },
+        "status": {
+          "200": 256131,
+          "503": 14652
+        },
+        "errors": {
+          "serverError": 14652,
+          "timeout": 46
+        },
+        "dropped": 23172
+      },
+      "byLabel": {
+        "detail": {
+          "count": 77795,
+          "rps": 1296.6,
+          "latencyMs": {
+            "mean": 262.35,
+            "p50": 0.89,
+            "p90": 164.35,
+            "p95": 2529.28,
+            "p99": 5054.46,
+            "p999": 7901.18,
+            "max": 10827.14
+          },
+          "status": {
+            "200": 77795,
+            "503": 3131
+          },
+          "errors": {
+            "serverError": 3131,
+            "timeout": 36
+          },
+          "dropped": 7096
+        },
+        "list": {
+          "count": 178336,
+          "rps": 2972.3,
+          "latencyMs": {
+            "mean": 225.11,
+            "p50": 1.09,
+            "p90": 103.81,
+            "p95": 1709.06,
+            "p99": 5591.04,
+            "p999": 7208.96,
+            "max": 10479.82
+          },
+          "status": {
+            "200": 178336,
+            "503": 11521
+          },
+          "errors": {
+            "serverError": 11521,
+            "timeout": 10
+          },
+          "dropped": 16076
+        }
+      }
+    }
+  ],
+  "instances": {
+    "05bdc9261999": 67666,
+    "19f86cc958cf": 67709,
+    "a65ddc7a1fd2": 67702,
+    "ed72f420a4fc": 67706
+  },
+  "checks": [
+    {
+      "name": "error rate",
+      "ok": false,
+      "message": "5.43% (14698 of 270829) > --max-error-rate 0.00%"
+    }
+  ],
+  "notes": {},
+  "interrupted": false,
+  "ok": false
+}

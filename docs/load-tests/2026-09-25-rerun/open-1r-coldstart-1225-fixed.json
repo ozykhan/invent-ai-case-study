@@ -1,0 +1,87 @@
+{
+  "scenario": "browse",
+  "target": "http://localhost:3000",
+  "startedAt": "2026-09-25T19:14:28.530Z",
+  "options": {
+    "model": "open",
+    "rate": 1225,
+    "rampMs": 0,
+    "maxInflight": 10000,
+    "durationMs": 30000,
+    "warmupMs": 0,
+    "connections": 10000,
+    "timeoutMs": 10000,
+    "seed": 42,
+    "maxPage": 5,
+    "maxErrorRate": 0
+  },
+  "phases": [
+    {
+      "name": "main",
+      "elapsedSeconds": 30,
+      "total": {
+        "count": 36751,
+        "rps": 1225,
+        "latencyMs": {
+          "mean": 114.12,
+          "p50": 0.6,
+          "p90": 4.22,
+          "p95": 1107.97,
+          "p99": 2256.9,
+          "p999": 2482.18,
+          "max": 2554.91
+        },
+        "status": {
+          "200": 36751
+        },
+        "errors": {},
+        "dropped": 0
+      },
+      "byLabel": {
+        "detail": {
+          "count": 11016,
+          "rps": 367.2,
+          "latencyMs": {
+            "mean": 122.74,
+            "p50": 0.45,
+            "p90": 4.74,
+            "p95": 1244.16,
+            "p99": 2304,
+            "p999": 2398.21,
+            "max": 2472.8
+          },
+          "status": {
+            "200": 11016
+          },
+          "errors": {},
+          "dropped": 0
+        },
+        "list": {
+          "count": 25735,
+          "rps": 857.8,
+          "latencyMs": {
+            "mean": 110.44,
+            "p50": 0.62,
+            "p90": 4.1,
+            "p95": 1075.2,
+            "p99": 2207.74,
+            "p999": 2496.51,
+            "max": 2554.91
+          },
+          "status": {
+            "200": 25735
+          },
+          "errors": {},
+          "dropped": 0
+        }
+      }
+    }
+  ],
+  "instances": {
+    "macmini.local": 36751
+  },
+  "checks": [],
+  "notes": {},
+  "interrupted": false,
+  "ok": true
+}

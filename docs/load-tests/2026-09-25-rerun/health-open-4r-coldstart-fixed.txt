@@ -1,0 +1,20 @@
+# docker compose --profile lb up -d --build --no-deps --scale api-lb=4 api-lb nginx
+ Container modaco-api-api-lb-1 Starting 
+ Container modaco-api-api-lb-1 Started 
+ Container modaco-api-api-lb-4 Starting 
+ Container modaco-api-api-lb-4 Started 
+ Container modaco-api-api-lb-2 Starting 
+ Container modaco-api-api-lb-2 Started 
+ Container modaco-api-nginx-1 Starting 
+ Container modaco-api-nginx-1 Started 
+2026-09-25T19:17:10Z modaco-api-api-lb-1 answers /health
+2026-09-25T19:17:10Z modaco-api-api-lb-2 answers /health
+2026-09-25T19:17:10Z modaco-api-api-lb-3 answers /health
+2026-09-25T19:17:11Z modaco-api-api-lb-4 answers /health
+# docker compose restart nginx
+ Container modaco-api-nginx-1 Restarting 
+ Container modaco-api-nginx-1 Started 
+ok  postgres up  redis up  instance 05bdc9261999
+ok  postgres up  redis up  instance 05bdc9261999
+ok  postgres up  redis up  instance 05bdc9261999
+flush: (dbsize 0)

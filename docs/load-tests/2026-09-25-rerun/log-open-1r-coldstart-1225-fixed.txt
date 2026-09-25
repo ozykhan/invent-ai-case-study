@@ -1,0 +1,20 @@
+2026-09-25T19:14:28Z # cmd: pnpm -s modaco load browse --rate 1225/s --duration 30s --warmup 0s --seed 42 --out docs/load-tests/2026-09-25-rerun/open-1r-coldstart-1225-fixed.json
+2026-09-25T19:14:28Z  WARN  Issue while reading "/Users/fco/.npmrc". Failed to replace env in config: ${GITHUB_PACKAGES_TOKEN}
+2026-09-25T19:14:46Z sampled 2000 product ids across 8 categories (catalog total 499479)
+2026-09-25T19:14:46Z phase main: 30s
+2026-09-25T19:14:51Z [main 5.0s] 1225 req/s  p50 190.85ms  p99 2453.5ms  errors 0  dropped 0  in-flight 1
+2026-09-25T19:14:56Z [main 10.0s] 1225 req/s  p50 0.6ms  p99 3.15ms  errors 0  dropped 0  in-flight 1
+2026-09-25T19:15:01Z [main 15.0s] 1225 req/s  p50 0.59ms  p99 4.83ms  errors 0  dropped 0  in-flight 1
+2026-09-25T19:15:06Z [main 20.0s] 1225 req/s  p50 0.56ms  p99 2.54ms  errors 0  dropped 0  in-flight 1
+2026-09-25T19:15:11Z [main 25.0s] 1225 req/s  p50 0.58ms  p99 7.63ms  errors 0  dropped 0  in-flight 1
+2026-09-25T19:15:16Z browse -> http://localhost:3000  model=open rate=1225 rampMs=0 maxInflight=10000 durationMs=30000 warmupMs=0 connections=10000 timeoutMs=10000 seed=42 maxPage=5 maxErrorRate=0
+2026-09-25T19:15:16Z 
+2026-09-25T19:15:16Z phase main (30s), latency in ms
+2026-09-25T19:15:16Z   label   count  req/s  p50   p90   p95      p99      p99.9    max      errors  dropped  status
+2026-09-25T19:15:16Z   total   36751  1225   0.6   4.22  1107.97  2256.9   2482.18  2554.91  0       0        200:36751
+2026-09-25T19:15:16Z   detail  11016  367.2  0.45  4.74  1244.16  2304     2398.21  2472.8   0       0        200:11016
+2026-09-25T19:15:16Z   list    25735  857.8  0.62  4.1   1075.2   2207.74  2496.51  2554.91  0       0        200:25735
+2026-09-25T19:15:16Z 
+2026-09-25T19:15:16Z instances (1)
+2026-09-25T19:15:16Z   macmini.local  36751  100.0%
+2026-09-25T19:15:16Z # exit 0
