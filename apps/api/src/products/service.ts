@@ -1,9 +1,10 @@
-import type { ProductRecord } from '@modaco/core';
+import { eq, sql } from 'drizzle-orm';
+import { bumpCategory, categories, products, type ProductRecord } from '@modaco/core';
 import type { AppDeps } from '../deps';
-import { notFound } from '../errors';
+import { conflict, notFound, pgErrorCode, unprocessable } from '../errors';
 import { getCachedProduct, getCachedProductPage, resolveCategoryId } from './cached-reads';
-import type { ListQuery } from './schemas';
-import { loadStocks } from './stock';
+import type { CreateProductBody, ListQuery, StockBody } from './schemas';
+import { loadStocks, setStock } from './stock';
 
 export interface ProductItem extends ProductRecord { stock: number }
 
@@ -33,5 +34,42 @@ export class ProductService {
       items: page.items.map((i) => ({ ...i, stock: stocks.get(i.id) ?? 0 })),
       pagination: { page: q.page, pageSize: q.pageSize, total: page.total },
     };
+  }
+
+  async createProduct(body: CreateProductBody): Promise<ProductItem> {
+    const [cat] = await this.deps.db.select({ id: categories.id }).from(categories).where(eq(categories.id, body.categoryId));
+    if (!cat) throw notFound(`category ${body.categoryId} not found`);
+    let id: number;
+    try {
+      const [row] = await this.deps.db.insert(products).values({
+        sku: body.sku, name: body.name, categoryId: body.categoryId, basePrice: body.basePrice, stock: body.stock,
+      }).returning({ id: products.id });
+      id = row!.id;
+    } catch (err) {
+      if (pgErrorCode(err) === '23505') throw conflict(`sku '${body.sku}' already exists`);
+      throw err;
+    }
+    if (this.deps.redis) {
+      await bumpCategory(this.deps.redis, body.categoryId, (msg, err) => this.deps.logger.error({ err }, msg));
+    }
+    await setStock(this.deps, id, body.stock);
+    return (await this.getProduct(id))!;
+  }
+
+  async adjustStock(id: number, body: StockBody): Promise<{ id: number; stock: number } | null> {
+    const [exists] = await this.deps.db.select({ stock: products.stock }).from(products).where(eq(products.id, id));
+    if (!exists) return null;
+    const set = 'delta' in body
+      ? { stock: sql`${products.stock} + ${body.delta}`, updatedAt: sql`now()` }
+      : { stock: body.stock, updatedAt: sql`now()` };
+    let row: { id: number; stock: number } | undefined;
+    try {
+      [row] = await this.deps.db.update(products).set(set).where(eq(products.id, id)).returning({ id: products.id, stock: products.stock });
+    } catch (err) {
+      if (pgErrorCode(err) === '23514') throw unprocessable('stock cannot go below zero');
+      throw err;
+    }
+    await setStock(this.deps, id, row!.stock);
+    return row!;
   }
 }

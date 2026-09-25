@@ -134,6 +134,40 @@ describe('GET /products', () => {
   });
 });
 
+describe('POST /products', () => {
+  it('creates a product that immediately inherits an active category promotion', async () => {
+    await activePromo();
+    await request(ctx.app).get('/products?category=accessories'); // warm the list cache
+    const res = await request(ctx.app).post('/products').send({ sku: 'RING', name: 'Ring', categoryId: acc.id, basePrice: '30.00', stock: 2 });
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({ sku: 'RING', effectivePrice: '15.00', stock: 2, activePromotion: { name: 'Sale' } });
+    const list = await request(ctx.app).get('/products?category=accessories');
+    expect(list.body.pagination.total).toBe(3);
+    expect(list.body.items.find((i: { sku: string }) => i.sku === 'RING').effectivePrice).toBe('15.00');
+  });
+  it('rejects a duplicate sku, unknown category, and bad body', async () => {
+    expect((await request(ctx.app).post('/products').send({ sku: 'BELT', name: 'x', categoryId: acc.id, basePrice: '1.00' })).status).toBe(409);
+    expect((await request(ctx.app).post('/products').send({ sku: 'NEW', name: 'x', categoryId: 999, basePrice: '1.00' })).status).toBe(404);
+    expect((await request(ctx.app).post('/products').send({ sku: 'NEW', name: 'x', categoryId: acc.id, basePrice: '1.999' })).status).toBe(400);
+  });
+});
+
+describe('PATCH /products/:id/stock', () => {
+  it('applies a delta and an absolute value, visible immediately', async () => {
+    await request(ctx.app).get(`/products/${belt.id}`);
+    let res = await request(ctx.app).patch(`/products/${belt.id}/stock`).send({ delta: -2 });
+    expect(res.body).toEqual({ id: belt.id, stock: 1 });
+    expect((await request(ctx.app).get(`/products/${belt.id}`)).body.stock).toBe(1);
+    res = await request(ctx.app).patch(`/products/${belt.id}/stock`).send({ stock: 10 });
+    expect(res.body).toEqual({ id: belt.id, stock: 10 });
+    expect((await request(ctx.app).get(`/products/${belt.id}`)).body.stock).toBe(10);
+  });
+  it('refuses to go negative and 404s on unknown ids', async () => {
+    expect((await request(ctx.app).patch(`/products/${hat.id}/stock`).send({ delta: -1 })).status).toBe(422);
+    expect((await request(ctx.app).patch('/products/999999/stock').send({ delta: 1 })).status).toBe(404);
+  });
+});
+
 describe('when redis is unreachable', () => {
   let dead: ReturnType<typeof createRedis>;
   let deadApp: Express;
