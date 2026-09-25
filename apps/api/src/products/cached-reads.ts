@@ -1,7 +1,7 @@
 import { eq } from 'drizzle-orm';
 import {
-  categories, fetchProductById, fetchProductPage, getVersions, keys, nextPromotionBoundary, parseVersion, products,
-  readThrough, SLUG_TTL_SECONDS, ttlSeconds, type ProductRecord, type Redis, type SortDir,
+  categories, fetchProductById, fetchProductPage, getVersions, keys, nextPromotionBoundary, NOT_FOUND_TTL_SECONDS,
+  parseVersion, products, readThrough, SLUG_TTL_SECONDS, ttlSeconds, type ProductRecord, type Redis, type SortDir,
 } from '@modaco/core';
 import type { AppDeps } from '../deps';
 
@@ -48,11 +48,11 @@ export async function getCachedProduct(deps: AppDeps, id: number): Promise<Cache
     // or after the fetch makes the current version strictly newer than what's stamped, so isFresh
     // correctly rejects it on the next read instead. The lookup is a cheap indexed PK read.
     const [catRow] = await deps.db.select({ categoryId: products.categoryId }).from(products).where(eq(products.id, id));
-    if (!catRow) return { value: null, ttlSeconds: 5 };
+    if (!catRow) return { value: null, ttlSeconds: NOT_FOUND_TTL_SECONDS };
     const { versions, ok } = await safeVersions(deps, redis, [keys.productVersion(id), keys.categoryVersion(catRow.categoryId)]);
     const [productVersion, categoryVersion] = versions;
     const record = await fetchProductById(deps.db, id, now);
-    if (!record) return { value: null, ttlSeconds: 5 };
+    if (!record) return { value: null, ttlSeconds: NOT_FOUND_TTL_SECONDS };
     // Defensive: if the product's category itself changed between the lookup above and this
     // fetch (a rare admin operation, not a promotion bump), the version we captured belongs to
     // the wrong category — don't cache that mismatch.
@@ -100,9 +100,16 @@ export async function getCachedProductPage(
     const page = await fetchProductPage(deps.db, {
       categoryId: opts.categoryId, sort: opts.sort, limit: opts.pageSize, offset: (opts.page - 1) * opts.pageSize, now,
     });
-    // A page past the end is empty and cheap to recompute; not caching it keeps arbitrary page numbers
-    // from filling Redis with empty entries.
-    if (page.items.length === 0 && opts.page > 1) return { value: { version: version ?? 0, ...page }, ttlSeconds: 1, cache: false };
+    // A page past the end is empty and cheap to recompute. It's still worth caching (with a short
+    // TTL) rather than marking it uncacheable: `cache: false` makes every concurrent reader of the
+    // key wait out readThrough's full poll window before falling back to Postgres (crawlers hammer
+    // exactly this kind of key, since `page` is attacker-controlled up to its cap). A short-TTL
+    // entry serves those readers a cache hit instead, and staleness is bounded by the TTL plus the
+    // normal version check above (a write that populates the page bumps the version and invalidates
+    // it sooner).
+    if (page.items.length === 0 && opts.page > 1) {
+      return { value: { version: version ?? 0, ...page }, ttlSeconds: NOT_FOUND_TTL_SECONDS };
+    }
     const boundary = await nextPromotionBoundary(deps.db, { categoryId: opts.categoryId }, now);
     return { value: { version: version ?? 0, ...page }, ttlSeconds: ttlSeconds(now, boundary), cache: ok };
   }, {
