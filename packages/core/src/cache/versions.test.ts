@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { keys } from './keys';
 import { createRedis } from './redis';
-import { bumpCategory, bumpProduct, bumpVersions, getVersions, parseVersion } from './versions';
+import { bumpCategory, bumpVersions, getVersions, parseVersion } from './versions';
 
 const redis = createRedis(process.env.REDIS_URL ?? 'redis://localhost:6379');
 beforeAll(() => redis.connect());
@@ -33,9 +33,9 @@ describe('bumpVersions', () => {
     dead.disconnect();
   });
 
-  it('round-trips against real redis: bumpCategory/bumpProduct are reflected by getVersions', async () => {
+  it('round-trips against real redis: bumps are reflected by getVersions', async () => {
     await bumpCategory(redis, 3);
-    await bumpProduct(redis, 7);
+    await bumpVersions(redis, [keys.productVersion(7)]);
     await bumpCategory(redis, 3);
 
     const [categoryV, allV, productV, missingV] = await getVersions(redis, [

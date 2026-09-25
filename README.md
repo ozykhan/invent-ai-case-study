@@ -39,7 +39,7 @@ docker compose exec api pnpm seed
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/health` | Postgres and Redis checks; 503 only if Postgres is down |
-| GET | `/products?category=&sort=&page=&pageSize=` | List with effective price. `category` is a slug; `sort` is `effective_price` (default) or `-effective_price`; `pageSize` max 100 |
+| GET | `/products?category=&sort=&page=&pageSize=` | List with effective price. `category` is a slug; `sort` is `effective_price` (default) or `-effective_price`; `page` max 1000, `pageSize` max 100 |
 | GET | `/products/:id` | Single product with effective price, active promotion and live stock |
 | POST | `/products` | Create a product; it inherits any active category promotion immediately |
 | PATCH | `/products/:id/stock` | Set `{ "stock": n }` or adjust `{ "delta": n }` |
@@ -128,7 +128,7 @@ Required parameters:
 - `DatabaseUrl`: Postgres connection string. In production point this at an **RDS Proxy** endpoint: each worker holds a pool of 2, and the proxy multiplexes Lambda connections onto a small set of database connections.
 - `RedisUrl`: Redis (e.g. ElastiCache) URL, used for version bumps and stock counters.
 
-Optional: `ChunkSizeBytes` (4194304), `UpsertBatchSize` (1000), `WorkerReservedConcurrency` (10). The template has no `VpcConfig`; if Postgres and Redis are in a VPC, add one to the functions. The API is not part of the template. To use the deployed bucket, set the API's `S3_BUCKET` to the stack's bucket name and both `AWS_ENDPOINT_URL` and `S3_PUBLIC_ENDPOINT` to the regional S3 endpoint (for example `https://s3.us-east-1.amazonaws.com`), because the API always uses an explicit endpoint. The API also builds its S3 credentials from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (falling back to `test`, no session token; see `apps/api/src/deps.ts`), so a deployed API needs static access keys rather than an IAM role or temporary credentials (ADR §10).
+Optional: `ChunkSizeBytes` (4194304), `UpsertBatchSize` (1000), `WorkerReservedConcurrency` (10). The template has no `VpcConfig`; if Postgres and Redis are in a VPC, add one to the functions. The API is not part of the template. To use the deployed bucket, set the API's `S3_BUCKET` to the stack's bucket name and `S3_PUBLIC_ENDPOINT` to the regional S3 endpoint (for example `https://s3.us-east-1.amazonaws.com`). The API's only S3 client is the presigner, which never calls S3 itself: it signs `PUT` URLs against that explicit endpoint (path-style), so the endpoint must be one the uploader can reach. `AWS_ENDPOINT_URL` is not read by the API. The presigner's credentials come from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (falling back to `test`, no session token; see `apps/api/src/deps.ts`), so a deployed API needs static access keys rather than an IAM role or temporary credentials (ADR §10).
 
 ## Layout
 

@@ -1,5 +1,5 @@
 import { eq, sql } from 'drizzle-orm';
-import { bumpCategory, categories, products, type ProductRecord } from '@modaco/core';
+import { bumpCategory, categories, fetchProductById, keys, products, type ProductRecord } from '@modaco/core';
 import type { AppDeps } from '../deps';
 import { conflict, notFound, pgErrorCode, unprocessable } from '../errors';
 import { getCachedProduct, getCachedProductPage, resolveCategoryId } from './cached-reads';
@@ -39,21 +39,27 @@ export class ProductService {
   async createProduct(body: CreateProductBody): Promise<ProductItem> {
     const [cat] = await this.deps.db.select({ id: categories.id }).from(categories).where(eq(categories.id, body.categoryId));
     if (!cat) throw notFound(`category ${body.categoryId} not found`);
-    let id: number;
+    let created: { id: number; stock: number };
     try {
       const [row] = await this.deps.db.insert(products).values({
         sku: body.sku, name: body.name, categoryId: body.categoryId, basePrice: body.basePrice, stock: body.stock,
-      }).returning({ id: products.id });
-      id = row!.id;
+      }).returning({ id: products.id, stock: products.stock });
+      created = row!;
     } catch (err) {
       if (pgErrorCode(err) === '23505') throw conflict(`sku '${body.sku}' already exists`);
       throw err;
     }
-    if (this.deps.redis) {
-      await bumpCategory(this.deps.redis, body.categoryId, (msg, err) => this.deps.logger.error({ err }, msg));
+    const redis = this.deps.redis;
+    if (redis) {
+      await bumpCategory(redis, body.categoryId, (msg, err) => this.deps.logger.error({ err }, msg));
+      // A GET for this id just before the insert cached a short-lived "not found" entry, which carries
+      // no versions and so would read as fresh: drop it (best effort) so GETs see the new product.
+      await redis.del(keys.product(created.id)).catch((err) => this.deps.logger.warn({ err, id: created.id }, 'product cache delete failed'));
     }
-    await setStock(this.deps, id, body.stock);
-    return (await this.getProduct(id))!;
+    await setStock(this.deps, created.id, created.stock);
+    // Built straight from Postgres rather than through the cache, so the response never depends on that delete.
+    const record = await fetchProductById(this.deps.db, created.id, this.deps.now());
+    return { ...record!, stock: created.stock };
   }
 
   async adjustStock(id: number, body: StockBody): Promise<{ id: number; stock: number } | null> {
@@ -67,6 +73,7 @@ export class ProductService {
       [row] = await this.deps.db.update(products).set(set).where(eq(products.id, id)).returning({ id: products.id, stock: products.stock });
     } catch (err) {
       if (pgErrorCode(err) === '23514') throw unprocessable('stock cannot go below zero');
+      if (pgErrorCode(err) === '22003') throw unprocessable('stock would exceed the maximum of 2147483647');
       throw err;
     }
     await setStock(this.deps, id, row!.stock);

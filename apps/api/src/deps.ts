@@ -6,7 +6,7 @@ import { createLogger, type Logger } from './logger';
 export interface AppDeps {
   db: Db;
   redis: Redis | null;
-  s3: S3Client;
+  /** The API's only S3 client: it signs upload URLs and never calls S3 itself. */
   presigner: S3Client;
   config: Config;
   logger: Logger;
@@ -19,11 +19,13 @@ export async function createDeps(config: Config): Promise<AppDeps & { close(): P
   const redis = createRedis(config.redisUrl);
   redis.on('error', (err) => logger.warn({ err }, 'redis error'));
   await redis.connect().catch((err) => logger.warn({ err }, 'redis initial connect failed; continuing degraded'));
-  const s3Opts = { region: config.awsRegion, forcePathStyle: true, credentials: { accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? 'test', secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? 'test' } };
-  const s3 = new S3Client({ ...s3Opts, endpoint: config.awsEndpointUrl });
-  const presigner = new S3Client({ ...s3Opts, endpoint: config.s3PublicEndpoint });
+  // The endpoint is the one the uploader will connect to, so it is baked into every presigned URL.
+  const presigner = new S3Client({
+    region: config.awsRegion, forcePathStyle: true, endpoint: config.s3PublicEndpoint,
+    credentials: { accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? 'test', secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? 'test' },
+  });
   return {
-    db, redis, s3, presigner, config, logger, now: () => new Date(),
+    db, redis, presigner, config, logger, now: () => new Date(),
     close: async () => { await closeDb(); redis.disconnect(); },
   };
 }

@@ -66,32 +66,36 @@ export async function readThrough<T, E = undefined>(
     return { value };
   };
 
+  let lockKey: string | undefined;
   try {
     const hit = await tryHit();
     if (hit !== undefined) return { value: hit.value, source: 'hit', extra: hit.extra };
 
-    const lockKey = keys.lock(key);
-    const locked = await redis.set(lockKey, '1', 'PX', lockMs, 'NX');
+    const locked = await redis.set(keys.lock(key), '1', 'PX', lockMs, 'NX');
     if (locked === 'OK') {
-      try {
-        const built = await build();
-        if (built.cache !== false) {
-          await redis.set(key, JSON.stringify(built.value), 'EX', Math.max(1, built.ttlSeconds));
-        }
-        return { value: built.value, source: 'built' };
-      } finally {
-        await redis.del(lockKey).catch(onError);
+      lockKey = keys.lock(key);
+    } else {
+      const deadline = Date.now() + waitMs;
+      while (Date.now() < deadline) {
+        await sleep(pollMs);
+        const late = await tryHit();
+        if (late !== undefined) return { value: late.value, source: 'hit', extra: late.extra };
       }
-    }
-
-    const deadline = Date.now() + waitMs;
-    while (Date.now() < deadline) {
-      await sleep(pollMs);
-      const late = await tryHit();
-      if (late !== undefined) return { value: late.value, source: 'hit', extra: late.extra };
     }
   } catch (err) {
     onError(err);
   }
-  return { value: (await build()).value, source: 'bypass' };
+  if (lockKey === undefined) return { value: (await build()).value, source: 'bypass' };
+
+  // The lock holder. A build() error is the caller's (e.g. Postgres down), not cache degradation: it
+  // propagates as is, and building again would only repeat it. Only the cache write is best effort.
+  try {
+    const built = await build();
+    if (built.cache !== false) {
+      await redis.set(key, JSON.stringify(built.value), 'EX', Math.max(1, built.ttlSeconds)).catch(onError);
+    }
+    return { value: built.value, source: 'built' };
+  } finally {
+    await redis.del(lockKey).catch(onError);
+  }
 }

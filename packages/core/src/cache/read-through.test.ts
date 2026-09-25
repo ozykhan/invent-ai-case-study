@@ -94,6 +94,32 @@ describe('readThrough', () => {
     expect(await redis.get('k')).toBeNull();
   });
 
+  it('returns the built value without rebuilding when only the cache SET fails', async () => {
+    const realSet = redis.set.bind(redis) as (...args: unknown[]) => Promise<unknown>;
+    const set = vi.spyOn(redis, 'set').mockImplementation(((...args: unknown[]) =>
+      args[0] === 'k' ? Promise.reject(new Error('set failed')) : realSet(...args)) as never);
+    const build = vi.fn(async () => ({ value: { v: 1 }, ttlSeconds: 10 }));
+    const errors: unknown[] = [];
+    try {
+      const res = await readThrough(redis, 'k', build, { onError: (e) => errors.push(e) });
+      expect(res).toEqual({ value: { v: 1 }, source: 'built' });
+    } finally {
+      set.mockRestore();
+    }
+    expect(build).toHaveBeenCalledTimes(1);
+    expect(errors).toEqual([expect.objectContaining({ message: 'set failed' })]);
+    expect(await redis.get('lock:k')).toBeNull();
+  });
+
+  it('propagates a build error from the lock holder without rebuilding or reporting cache degradation', async () => {
+    const build = vi.fn(async (): Promise<{ value: string; ttlSeconds: number }> => { throw new Error('db down'); });
+    const onError = vi.fn();
+    await expect(readThrough(redis, 'k', build, { onError })).rejects.toThrow('db down');
+    expect(build).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+    expect(await redis.get('lock:k')).toBeNull();
+  });
+
   it('falls back to the builder when a command stalls past commandTimeout', async () => {
     // CLIENT PAUSE stalls the server's replies to every connection, including new ones, for
     // pauseMs; createRedis's commandTimeout (300ms) should reject `redis`'s GET client-side well

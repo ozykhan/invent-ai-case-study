@@ -1,6 +1,6 @@
 import { keys } from '@modaco/core';
 import request from 'supertest';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setupTestDeps, type TestContext } from './helpers';
 
 let ctx: TestContext;
@@ -64,6 +64,8 @@ describe('POST /promotions', () => {
     expect((await request(ctx.app).post('/promotions').send(body({ target: {} }))).status).toBe(400);
     expect((await request(ctx.app).post('/promotions').send(body({ value: 'abc' }))).status).toBe(400);
     expect((await request(ctx.app).post('/promotions').send(body({ value: '12345678901' }))).status).toBe(400); // 11 integer digits
+    expect((await request(ctx.app).post('/promotions').send(body({ target: { categoryId: 3_000_000_000 } }))).status).toBe(400); // past int4
+    expect((await request(ctx.app).post('/promotions').send(body({ target: { productId: 3_000_000_000 } }))).status).toBe(400);
   });
 });
 
@@ -89,6 +91,25 @@ describe('POST /promotions/:id/cancel', () => {
     await request(ctx.app).post(`/promotions/${promo.id}/cancel`);
     const afterSecond = { cat: await ctx.redis.get(keys.categoryVersion(acc.id)), all: await ctx.redis.get(keys.allVersion()) };
     expect(afterSecond).toEqual(afterFirst);
+  });
+
+  it('a cancel that fails partway still bumps the versions when retried', async () => {
+    const { body: promo } = await request(ctx.app).post('/promotions').send(body({ target: { productId: belt.id } }));
+    const read = async () => ({
+      product: Number(await ctx.redis.get(keys.productVersion(belt.id))),
+      cat: Number(await ctx.redis.get(keys.categoryVersion(acc.id))),
+    });
+    const before = await read();
+    // Every read in the first attempt fails (e.g. a connection blip). The attempt must fail without
+    // having cancelled anything, so that the retry is the one that cancels and bumps.
+    const select = vi.spyOn(ctx.deps.db, 'select').mockImplementation(() => { throw new Error('connection blip'); });
+    const failed = await request(ctx.app).post(`/promotions/${promo.id}/cancel`);
+    select.mockRestore();
+    expect(failed.status).toBe(500);
+    const retry = await request(ctx.app).post(`/promotions/${promo.id}/cancel`);
+    expect(retry.status).toBe(200);
+    expect(retry.body.cancelledAt).not.toBeNull();
+    expect(await read()).toEqual({ product: before.product + 1, cat: before.cat + 1 });
   });
 
   it('two concurrent cancels bump exactly once', async () => {

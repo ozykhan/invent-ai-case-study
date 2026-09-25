@@ -15,9 +15,8 @@ const onError = (deps: AppDeps) => (err: unknown) => deps.logger.warn({ err }, '
 /**
  * Version reads must never throw, and a value built from a version read that failed must never be
  * cached: a dead Redis client rejects the command outright (not just times out on a GET), and that
- * happens inside the builder itself — which readThrough calls both from the lock-holder path and,
- * unconditionally, from its own bypass fallback (outside any try/catch it controls) — so the
- * failure has to be swallowed here rather than relying on readThrough's error handling.
+ * happens inside the builder itself, whose errors readThrough propagates to the caller from both the
+ * lock-holder and the bypass path — so the failure has to be swallowed here.
  */
 async function safeVersions(deps: AppDeps, redis: Redis | null, versionKeys: string[]): Promise<{ versions: number[]; ok: boolean }> {
   if (!redis) return { versions: versionKeys.map(() => 0), ok: true };
@@ -101,6 +100,9 @@ export async function getCachedProductPage(
     const page = await fetchProductPage(deps.db, {
       categoryId: opts.categoryId, sort: opts.sort, limit: opts.pageSize, offset: (opts.page - 1) * opts.pageSize, now,
     });
+    // A page past the end is empty and cheap to recompute; not caching it keeps arbitrary page numbers
+    // from filling Redis with empty entries.
+    if (page.items.length === 0 && opts.page > 1) return { value: { version: version ?? 0, ...page }, ttlSeconds: 1, cache: false };
     const boundary = await nextPromotionBoundary(deps.db, { categoryId: opts.categoryId }, now);
     return { value: { version: version ?? 0, ...page }, ttlSeconds: ttlSeconds(now, boundary), cache: ok };
   }, {

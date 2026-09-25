@@ -39,7 +39,3 @@ export async function bumpVersions(redis: Redis, versionKeys: string[], log: Log
 export function bumpCategory(redis: Redis, categoryId: number, log?: Log): Promise<void> {
   return bumpVersions(redis, [keys.categoryVersion(categoryId), keys.allVersion()], log);
 }
-
-export function bumpProduct(redis: Redis, productId: number, log?: Log): Promise<void> {
-  return bumpVersions(redis, [keys.productVersion(productId)], log);
-}

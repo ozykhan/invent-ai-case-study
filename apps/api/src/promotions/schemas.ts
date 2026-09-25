@@ -1,11 +1,11 @@
 import { z } from 'zod';
-import { moneyString } from '../schemas';
+import { int4, moneyString } from '../schemas';
 
 export const promotionIdParam = z.object({ id: z.string().uuid() });
 
 export const targetSchema = z.union([
-  z.object({ productId: z.number().int().positive() }).strict(),
-  z.object({ categoryId: z.number().int().positive() }).strict(),
+  z.object({ productId: int4().positive() }).strict(),
+  z.object({ categoryId: int4().positive() }).strict(),
 ]);
 export type Target = z.infer<typeof targetSchema>;
 

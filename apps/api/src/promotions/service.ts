@@ -82,6 +82,16 @@ export class PromotionService {
   }
 
   async cancel(id: string): Promise<PromotionView | null> {
+    const [current] = await this.deps.db.select().from(promotions).where(eq(promotions.id, id));
+    if (!current) return null;
+    if (current.cancelledAt) return toView(current);
+    // The bump's category lookup runs BEFORE the cancelling UPDATE: if it fails, nothing has been written
+    // and a retry goes through the whole path again. Run after the commit, a failure would leave the
+    // promotion cancelled with its bump lost for good, because every retry takes the no-op path below.
+    const target = toView(current).target;
+    const productCategoryId = 'productId' in target
+      ? (await this.deps.db.select({ categoryId: products.categoryId }).from(products).where(eq(products.id, target.productId)))[0]?.categoryId
+      : undefined;
     // A single conditional UPDATE, guarded by `cancelled_at is null`, makes this compare-and-set:
     // of two concurrent cancels, Postgres row-level locking lets exactly one UPDATE actually flip
     // cancelled_at and return a row: the other's WHERE clause no longer matches, so it returns none.
@@ -90,17 +100,9 @@ export class PromotionService {
       .where(and(eq(promotions.id, id), isNull(promotions.cancelledAt)))
       .returning();
     if (row) {
-      const view = toView(row);
-      // Only the winner of the race reaches here, so this runs at most once per actual
-      // cancellation. It's a query after the commit, but unlike create()'s insert this is safe to
-      // retry: a second cancel() call is a no-op (the guard above returns no row for it), so a
-      // failure here just leaves the category cache stale until its TTL — the same self-heal
-      // bumpVersions already relies on for a failed bump.
-      const productCategoryId = 'productId' in view.target
-        ? (await this.deps.db.select({ categoryId: products.categoryId }).from(products).where(eq(products.id, view.target.productId)))[0]?.categoryId
-        : undefined;
-      await this.bump(view.target, productCategoryId);
-      return view;
+      // Only the winner of the race reaches here, so the bump runs at most once per actual cancellation.
+      await this.bump(target, productCategoryId);
+      return toView(row);
     }
     const [existing] = await this.deps.db.select().from(promotions).where(eq(promotions.id, id));
     return existing ? toView(existing) : null;

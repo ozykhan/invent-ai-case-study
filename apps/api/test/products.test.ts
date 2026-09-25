@@ -1,5 +1,5 @@
-import { createRedis, keys, STOCK_TTL_SECONDS } from '@modaco/core';
-import { promotions } from '@modaco/core';
+import { createRedis, keys, products, promotions, STOCK_TTL_SECONDS } from '@modaco/core';
+import { desc } from 'drizzle-orm';
 import type { Express } from 'express';
 import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -42,6 +42,8 @@ describe('GET /products/:id', () => {
   it('404s for an unknown id and 400s for a bad id', async () => {
     expect((await request(ctx.app).get('/products/999999')).status).toBe(404);
     expect((await request(ctx.app).get('/products/abc')).status).toBe(400);
+    expect((await request(ctx.app).get('/products/2147483647')).status).toBe(404); // int4 max: valid, just absent
+    expect((await request(ctx.app).get('/products/3000000000')).status).toBe(400); // past int4: Postgres would reject it (22003)
   });
 
   it('serves from cache and invalidates when the category version is bumped', async () => {
@@ -107,8 +109,17 @@ describe('GET /products', () => {
 
   it('validates query params', async () => {
     expect((await request(ctx.app).get('/products?pageSize=500')).status).toBe(400);
+    expect((await request(ctx.app).get('/products?page=1001')).status).toBe(400);
+    expect((await request(ctx.app).get('/products?page=1000')).status).toBe(200);
     expect((await request(ctx.app).get('/products?sort=name')).status).toBe(400);
     expect((await request(ctx.app).get('/products?category=nope')).status).toBe(404);
+  });
+
+  it('returns an empty page past the total without caching it', async () => {
+    const res = await request(ctx.app).get('/products?page=50');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ items: [], pagination: { page: 50, pageSize: 20, total: 3 } });
+    expect(await ctx.redis.exists(keys.list(null, 'asc', 50, 20))).toBe(0);
   });
 
   it('caches a page and rebuilds it after a version bump', async () => {
@@ -146,10 +157,27 @@ describe('POST /products', () => {
     expect(list.body.pagination.total).toBe(3);
     expect(list.body.items.find((i: { sku: string }) => i.sku === 'RING').effectivePrice).toBe('15.00');
   });
+  it('returns the new product even when its id was cached as missing just before', async () => {
+    const [last] = await ctx.db.select({ id: products.id }).from(products).orderBy(desc(products.id)).limit(1);
+    const nextId = last!.id + 1;
+    expect((await request(ctx.app).get(`/products/${nextId}`)).status).toBe(404); // caches a negative entry for nextId
+    const res = await request(ctx.app).post('/products').send({ sku: 'RING', name: 'Ring', categoryId: acc.id, basePrice: '30.00', stock: 2 });
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({
+      id: nextId, sku: 'RING', name: 'Ring', category: { id: acc.id, name: 'Accessories', slug: 'accessories' },
+      basePrice: '30.00', effectivePrice: '30.00', activePromotion: null, stock: 2,
+    });
+    const get = await request(ctx.app).get(`/products/${nextId}`);
+    expect(get.status).toBe(200);
+    expect(get.body.sku).toBe('RING');
+  });
+
   it('rejects a duplicate sku, unknown category, and bad body', async () => {
     expect((await request(ctx.app).post('/products').send({ sku: 'BELT', name: 'x', categoryId: acc.id, basePrice: '1.00' })).status).toBe(409);
     expect((await request(ctx.app).post('/products').send({ sku: 'NEW', name: 'x', categoryId: 999, basePrice: '1.00' })).status).toBe(404);
     expect((await request(ctx.app).post('/products').send({ sku: 'NEW', name: 'x', categoryId: acc.id, basePrice: '1.999' })).status).toBe(400);
+    expect((await request(ctx.app).post('/products').send({ sku: 'NEW', name: 'x', categoryId: 3_000_000_000, basePrice: '1.00' })).status).toBe(400);
+    expect((await request(ctx.app).post('/products').send({ sku: 'NEW', name: 'x', categoryId: acc.id, basePrice: '1.00', stock: 3_000_000_000 })).status).toBe(400);
   });
 });
 
@@ -166,6 +194,14 @@ describe('PATCH /products/:id/stock', () => {
   it('refuses to go negative and 404s on unknown ids', async () => {
     expect((await request(ctx.app).patch(`/products/${hat.id}/stock`).send({ delta: -1 })).status).toBe(422);
     expect((await request(ctx.app).patch('/products/999999/stock').send({ delta: 1 })).status).toBe(404);
+  });
+  it('rejects values outside the int4 range instead of failing with a 500', async () => {
+    expect((await request(ctx.app).patch(`/products/${belt.id}/stock`).send({ stock: 3_000_000_000 })).status).toBe(400);
+    expect((await request(ctx.app).patch(`/products/${belt.id}/stock`).send({ delta: 3_000_000_000 })).status).toBe(400);
+    expect((await request(ctx.app).patch('/products/3000000000/stock').send({ delta: 1 })).status).toBe(400);
+    // Each value is in range but the sum is not: Postgres raises 22003, surfaced as a 422.
+    expect((await request(ctx.app).patch(`/products/${belt.id}/stock`).send({ stock: 2_147_483_647 })).status).toBe(200);
+    expect((await request(ctx.app).patch(`/products/${belt.id}/stock`).send({ delta: 1 })).status).toBe(422);
   });
 });
 

@@ -17,7 +17,8 @@ describe('POST /ingestion/jobs', () => {
     expect(res.body.uploadUrl).toContain('X-Amz-Signature');
     const put = await fetch(res.body.uploadUrl, { method: 'PUT', body: 'sku,name,category,vendor_price,stock\n' });
     expect(put.status).toBe(200);
-    const head = await ctx.deps.s3.send(new HeadObjectCommand({ Bucket: ctx.deps.config.s3Bucket, Key: res.body.key }));
+    // The API has no S3 client of its own beyond the presigner; reuse it (it points at LocalStack here) to check the upload landed.
+    const head = await ctx.deps.presigner.send(new HeadObjectCommand({ Bucket: ctx.deps.config.s3Bucket, Key: res.body.key }));
     expect(head.ContentLength).toBe(37);
     const job = await request(ctx.app).get(`/ingestion/jobs/${res.body.jobId}`);
     expect(job.body).toMatchObject({ id: res.body.jobId, status: 'pending', totalChunks: 0 });
