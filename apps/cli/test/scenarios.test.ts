@@ -67,3 +67,53 @@ describe('createScenario', () => {
     expect(() => createScenario('nope', { maxPage: 5 })).toThrow(/unknown scenario 'nope'/);
   });
 });
+
+describe('write-mix', () => {
+  it('mixes reads with stock writes and cleans up its promotions', async () => {
+    const doc = await runLoad(client, createScenario('write-mix', { maxPage: 5 }), opts({ durationMs: 600 }), quiet);
+    const main = doc.phases[0]!;
+    expect(Object.keys(main.byLabel)).toEqual(expect.arrayContaining(['detail', 'list', 'stock']));
+    const stockShare = main.byLabel.stock!.count / main.total.count;
+    expect(stockShare).toBeGreaterThan(0.08);
+    expect(stockShare).toBeLessThan(0.2);
+    expect(stub.state.hits.get('PATCH /products/:id/stock')).toBeGreaterThan(0);
+    expect(stub.state.openPromotions.size).toBe(0);
+  });
+
+  it('alternates promotion create and cancel, one request per slot', async () => {
+    const doc = await runLoad(client, createScenario('write-mix', { maxPage: 5, mix: { promo: 1 } }), opts({ model: { kind: 'closed', concurrency: 1 } }), quiet);
+    const { byLabel } = doc.phases[0]!;
+    expect(byLabel['promo:create']!.count).toBeGreaterThan(0);
+    expect(byLabel['promo:cancel']!.count).toBeGreaterThan(0);
+    expect(Math.abs(byLabel['promo:create']!.count - byLabel['promo:cancel']!.count)).toBeLessThanOrEqual(1);
+    expect(stub.state.openPromotions.size).toBe(0);
+  });
+});
+
+describe('flash-sale', () => {
+  it('records before and after phases, passes the mid-sale check, and cancels the promotion', async () => {
+    const doc = await runLoad(client, createScenario('flash-sale', { maxPage: 5, category: 'shoes' }), opts({ durationMs: 300 }), quiet);
+    expect(doc.phases.map((p) => p.name)).toEqual(['before', 'after']);
+    expect(doc.checks).toHaveLength(1);
+    expect(doc.checks[0]).toMatchObject({ name: 'mid-sale product discounted', ok: true });
+    expect(doc.notes.promotionId).toBe(stub.state.lastPromotionId);
+    expect(doc.notes.firstItemPriceBefore).toBe('20.00');
+    expect(doc.ok).toBe(true);
+    expect(stub.state.openPromotions.size).toBe(0);
+  });
+
+  it('fails the check but still cancels when the new product is not discounted', async () => {
+    const wrong = await startStubApi({ midSalePrice: '20.00' });
+    const c = new ApiClient({ baseUrl: wrong.url, timeoutMs: 5000 });
+    try {
+      const doc = await runLoad(c, createScenario('flash-sale', { maxPage: 5 }), opts({ durationMs: 300 }), quiet);
+      expect(doc.checks[0]).toMatchObject({ ok: false });
+      expect(doc.checks[0]!.message).toContain('expected 10.00');
+      expect(doc.ok).toBe(false);
+      expect(wrong.state.openPromotions.size).toBe(0);
+    } finally {
+      await c.close();
+      await wrong.close();
+    }
+  });
+});
