@@ -5,7 +5,7 @@ import { request as httpRequest, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import request from 'supertest';
 import { afterAll, describe, expect, it, vi } from 'vitest';
-import { loadConfig } from '../src/config';
+import { loadConfig, lockTtlWarning } from '../src/config';
 import { createDeps, type AppDeps } from '../src/deps';
 import { createLogger } from '../src/logger';
 import { ClientGoneError, clientAbort, clientSignal } from '../src/middleware/client-abort';
@@ -29,6 +29,13 @@ describe('database load-shedding config', () => {
     expect(c.dbJit).toBe(true);
     for (const v of ['off', 'false', '0']) expect(loadConfig({ DB_JIT: v }).dbJit).toBe(false);
     for (const v of ['on', 'true', '1']) expect(loadConfig({ DB_JIT: v }).dbJit).toBe(true);
+  });
+
+  it('warns when a bounded build could outlive the cache lock TTL', () => {
+    expect(lockTtlWarning(loadConfig({}))).toBeUndefined(); // 3 x (2 s + 5 s) = 21 s < 30 s
+    expect(lockTtlWarning(loadConfig({ DB_POOL_ACQUIRE_TIMEOUT_MS: '3000', DB_STATEMENT_TIMEOUT_MS: '7000' }))).toMatch(/30000/);
+    expect(lockTtlWarning(loadConfig({ DB_STATEMENT_TIMEOUT_MS: '0' }))).toMatch(/unbounded/);
+    expect(lockTtlWarning(loadConfig({ DB_POOL_ACQUIRE_TIMEOUT_MS: '0' }))).toMatch(/unbounded/);
   });
 
   it('rejects malformed values instead of silently disabling a timeout', () => {

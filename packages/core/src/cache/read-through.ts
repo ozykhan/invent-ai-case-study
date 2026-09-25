@@ -50,6 +50,9 @@ export class CacheWaitTimeoutError extends Error {
   }
 }
 
+/** Default TTL of a build lock (`lockMs`). */
+export const READ_THROUGH_LOCK_MS = 30_000;
+
 // Compare-and-delete: only the holder whose token is still in the lock may release it. A holder
 // whose lock expired must not delete the lock a newer holder took since.
 const RELEASE_LOCK = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`;
@@ -97,7 +100,7 @@ export async function readThrough<T, E = undefined>(
   build: () => Promise<BuildResult<T>>,
   opts: ReadThroughOptions<T, E> = {},
 ): Promise<CacheOutcome<T, E>> {
-  const { lockMs = 30_000, waitMs = 5000, pollMs = 20, maxPollMs = 100, onError = () => {}, extraKeys = [], signal } = opts;
+  const { lockMs = READ_THROUGH_LOCK_MS, waitMs = 5000, pollMs = 20, maxPollMs = 100, onError = () => {}, extraKeys = [], signal } = opts;
   if (!redis) return { value: (await build()).value, source: 'bypass' };
 
   const tryHit = async (): Promise<{ value: T; extra?: E } | undefined> => {

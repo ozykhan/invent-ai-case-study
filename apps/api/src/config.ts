@@ -1,4 +1,5 @@
 import { hostname } from 'node:os';
+import { READ_THROUGH_LOCK_MS } from '@modaco/core';
 import { z } from 'zod';
 
 const schema = z.object({
@@ -33,8 +34,8 @@ export interface Config {
    * 0 disables either one.
    *
    * Invariant: readThrough's lock TTL (30 s) must stay above the worst-case build, or the lock
-   * expires under a live holder and its waiters build too. The longest build is a product detail,
-   * three sequential queries (category lookup, fetch by id, promotion boundary), each bounded by
+   * expires under a live holder and a waiter takes it over and builds again (`lockTtlWarning`
+   * logs at startup when this is violated). The longest build is a product detail, three sequential queries (category lookup, fetch by id, promotion boundary), each bounded by
    * acquire + statement timeout: 3 x (2 s + 5 s) = 21 s with the defaults. A list page is two
    * phases (page with count in parallel, then boundary), 14 s. Raise the timeouts only with that in mind.
    */
@@ -53,4 +54,23 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dbPoolAcquireTimeoutMs: e.DB_POOL_ACQUIRE_TIMEOUT_MS, dbStatementTimeoutMs: e.DB_STATEMENT_TIMEOUT_MS,
     dbJit: ['on', 'true', '1'].includes(e.DB_JIT),
   };
+}
+
+/** A product detail build runs three sequential queries (category lookup, fetch by id, promotion boundary). */
+const MAX_SEQUENTIAL_BUILD_QUERIES = 3;
+
+/**
+ * Checks the invariant documented on `Config`: the worst-case bounded cache build must finish inside
+ * the build lock's TTL. Returns a warning to log at startup, or undefined when it holds.
+ */
+export function lockTtlWarning(config: Config): string | undefined {
+  const { dbPoolAcquireTimeoutMs: acquire, dbStatementTimeoutMs: statement } = config;
+  if (acquire === 0 || statement === 0) {
+    return `cache builds are unbounded (DB_POOL_ACQUIRE_TIMEOUT_MS=${acquire}, DB_STATEMENT_TIMEOUT_MS=${statement}); a slow build can outlive its ${READ_THROUGH_LOCK_MS} ms lock and a waiter will build it again`;
+  }
+  const worst = MAX_SEQUENTIAL_BUILD_QUERIES * (acquire + statement);
+  if (worst >= READ_THROUGH_LOCK_MS) {
+    return `worst-case cache build ${MAX_SEQUENTIAL_BUILD_QUERIES} x (${acquire} + ${statement}) = ${worst} ms is not below the ${READ_THROUGH_LOCK_MS} ms lock TTL; a slow build can outlive its lock and a waiter will build it again`;
+  }
+  return undefined;
 }

@@ -1,6 +1,6 @@
 import { S3Client } from '@aws-sdk/client-s3';
 import { createDb, createRedis, type Db, type Redis } from '@modaco/core';
-import type { Config } from './config';
+import { lockTtlWarning, type Config } from './config';
 import { createLogger, type Logger } from './logger';
 
 export interface AppDeps {
@@ -15,6 +15,8 @@ export interface AppDeps {
 
 export async function createDeps(config: Config): Promise<AppDeps & { close(): Promise<void> }> {
   const logger = createLogger(config.logLevel);
+  const lockWarning = lockTtlWarning(config);
+  if (lockWarning) logger.warn(lockWarning);
   const { db, close: closeDb } = createDb(config.databaseUrl, {
     max: 10,
     connectionTimeoutMillis: config.dbPoolAcquireTimeoutMs,
