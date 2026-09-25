@@ -1,6 +1,7 @@
 import { Command, CommanderError } from 'commander';
 import { registerHealth } from './commands/health';
 import { registerIngest } from './commands/ingest';
+import { registerLoad } from './commands/load';
 import { registerProducts } from './commands/products';
 import { registerPromotions } from './commands/promotions';
 import { ApiError, SetupError, UsageError } from './errors';
@@ -18,6 +19,7 @@ registerHealth(program);
 registerProducts(program);
 registerPromotions(program);
 registerIngest(program);
+registerLoad(program);
 
 /** Maps an error to an exit code: 2 for usage errors, 1 for API, setup and transport failures. */
 function report(err: unknown, opts: { url: string; json?: boolean }): number {
