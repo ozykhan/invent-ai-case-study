@@ -52,6 +52,35 @@ export function scheduledOffsetMs(k: number, ratePerSec: number, rampMs: number)
 const yieldToIo = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 /**
+ * Sleeps that one abort can end early. Each pending sleep holds one entry, which it removes when it ends, so nothing
+ * accumulates per past sleep. Below ~1000 req/s the open model sleeps once per request, and a per-sleep reaction on a
+ * long-lived abort promise used to keep ~0.5 KB per sleep until the phase ended (about 1 GB over a 1 h soak at 500/s).
+ */
+export class Sleeper {
+  private readonly wakers = new Set<() => void>();
+  private woken = false;
+
+  /** Sleeps currently waiting. */
+  get pending(): number { return this.wakers.size; }
+
+  /** Resolves after `ms`, or as soon as wakeAll() is called; at once if it already was. */
+  sleep(ms: number): Promise<void> {
+    if (this.woken) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const wake = () => { clearTimeout(timer); this.wakers.delete(wake); resolve(); };
+      const timer = setTimeout(wake, ms);
+      this.wakers.add(wake);
+    });
+  }
+
+  /** Ends every pending sleep now, and every later one immediately. */
+  wakeAll(): void {
+    this.woken = true;
+    for (const wake of [...this.wakers]) wake();
+  }
+}
+
+/**
  * Runs one phase of load. Open model: requests are due on a fixed schedule whatever the response times are, and
  * latency runs from the scheduled time, so a stalled server (or client) is charged for the requests it delayed
  * (coordinated omission). Closed model: `concurrency` workers loop send -> await -> send, and latency runs from the
@@ -63,20 +92,17 @@ export async function runPhase(transport: Transport, source: LoadSource, rng: Rn
   const start = performance.now();
   const deadline = start + opts.durationMs;
 
-  // A single abort promise shared by both models, so a wait is never longer than the time to abort. `abortedAt`
-  // records the moment the signal actually fired, for an accurate `elapsedSeconds` on an interrupted phase.
+  // Abort ends every wait at once: the open model's sleeps through `sleeper`, the closed model's race on `onAbort`
+  // (awaited once per phase, so it gathers no per-request reactions). `abortedAt` records the moment the signal
+  // actually fired, for an accurate `elapsedSeconds` on an interrupted phase.
   let abortedAt: number | undefined = aborted() ? start : undefined;
   let resolveAbort!: () => void;
   const onAbort = new Promise<void>((resolve) => { resolveAbort = resolve; });
-  const onAbortHandler = () => { abortedAt = performance.now(); resolveAbort(); };
-  if (aborted()) resolveAbort();
+  const sleeper = new Sleeper();
+  const onAbortHandler = () => { abortedAt = performance.now(); resolveAbort(); sleeper.wakeAll(); };
+  if (aborted()) { resolveAbort(); sleeper.wakeAll(); }
   else opts.signal?.addEventListener('abort', onAbortHandler, { once: true });
-
-  /** Sleeps `ms`, but resolves early - clearing its timer - if the phase aborts first. */
-  const sleepOrAbort = (ms: number): Promise<void> => new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    void onAbort.then(() => { clearTimeout(timer); resolve(); });
-  });
+  const sleepOrAbort = (ms: number) => sleeper.sleep(ms);
 
   const issue = (spec: RequestSpec, t0: number): Promise<void> => {
     const done: Promise<void> = transport.send(spec).then(
@@ -115,6 +141,9 @@ export async function runPhase(transport: Transport, source: LoadSource, rng: Rn
         const next = scheduledOffsetMs(k, rate, rampMs);
         if (next >= opts.durationMs) break;
         const wait = start + next - performance.now();
+        // setTimeout cannot wait less than 1 ms, so a gap under that is not slept but yielded (setImmediate below).
+        // Above ~1000 req/s every gap is under 1 ms and this loop never sleeps: it keeps one core busy between
+        // I/O turns. That is deliberate, the price of holding the schedule at high rates.
         if (wait >= 1) { await sleepOrAbort(wait); continue; }
         // Fire everything that is due, including requests that fell behind during a stall.
         const now = performance.now() - start;

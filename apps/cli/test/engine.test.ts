@@ -1,6 +1,6 @@
 import { performance } from 'node:perf_hooks';
 import { describe, expect, it } from 'vitest';
-import { runPhase, scheduledOffsetMs, type RequestSpec, type SendResult, type Transport } from '../src/load/engine';
+import { Sleeper, runPhase, scheduledOffsetMs, type RequestSpec, type SendResult, type Transport } from '../src/load/engine';
 import { Metrics } from '../src/load/metrics';
 import { createRng } from '../src/load/rng';
 
@@ -32,6 +32,27 @@ describe('scheduledOffsetMs', () => {
     expect(scheduledOffsetMs(125, 1000, 1000)).toBeCloseTo(500);
     expect(scheduledOffsetMs(500, 1000, 1000)).toBeCloseTo(1000);
     expect(scheduledOffsetMs(1500, 1000, 1000)).toBeCloseTo(2000);
+  });
+});
+
+describe('Sleeper', () => {
+  it('holds nothing for a sleep once it has ended (no per-sleep growth over a long open-model run)', async () => {
+    const s = new Sleeper();
+    await Promise.all(Array.from({ length: 2000 }, () => s.sleep(1)));
+    expect(s.pending).toBe(0);
+  });
+
+  it('wakes every pending sleep at once, and later sleeps return immediately', async () => {
+    const s = new Sleeper();
+    const sleeps = Promise.all([s.sleep(60_000), s.sleep(60_000), s.sleep(60_000)]);
+    expect(s.pending).toBe(3);
+    const t0 = performance.now();
+    s.wakeAll();
+    await sleeps;
+    expect(performance.now() - t0).toBeLessThan(100);
+    expect(s.pending).toBe(0);
+    await s.sleep(60_000);
+    expect(s.pending).toBe(0);
   });
 });
 
