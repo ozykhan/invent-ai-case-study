@@ -2233,6 +2233,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Create: `apps/api/src/products/schemas.ts`, `apps/api/src/products/stock.ts`, `apps/api/src/products/cached-reads.ts`, `apps/api/src/products/service.ts`, `apps/api/src/products/routes.ts`, `apps/api/test/products.test.ts`
 - Modify: `apps/api/src/app.ts`
 - Modify: `packages/core/src/cache/redis.ts`, `packages/core/src/cache/versions.ts`, `packages/core/src/index.ts` (add `throwOnPipelineError`, see Step 0)
+- Modify (fix round 1, post-review): `packages/core/src/cache/read-through.ts`, `packages/core/src/cache/read-through.test.ts` — `readThrough` gained `extraKeys`/an `isFresh` that can return `{ fresh, extra }`/a builder `cache: false` escape hatch, all backward compatible (see "Fix round 1" note before Step 3).
 
 **Interfaces:**
 - Produces:
@@ -2241,10 +2242,15 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
   - `loadStocks(deps, ids: number[]): Promise<Map<number, number>>`
   - `setStock(deps, id: number, stock: number): Promise<void>` (Redis set with `STOCK_TTL_SECONDS`, swallows errors)
   - `resolveCategoryId(deps, slug: string): Promise<number | null>`
-  - `getCachedProduct(deps, id: number): Promise<ProductRecord | null>`
+  - `getCachedProduct(deps, id: number): Promise<{ record: ProductRecord; stock?: number } | null>` (`stock` is only populated on a warm hit, where the freshness check already fetched it live; a miss/bypass leaves it `undefined` and the caller falls back to `loadStocks`)
   - `getCachedProductPage(deps, opts: { categoryId: number | null; sort: SortDir; page: number; pageSize: number }): Promise<{ items: ProductRecord[]; total: number }>`
   - `class ProductService { constructor(deps); getProduct(id): Promise<ProductItem | null>; listProducts(q: { category?: string; sort: 'effective_price' | '-effective_price'; page: number; pageSize: number }): Promise<{ items: ProductItem[]; pagination: { page: number; pageSize: number; total: number } }> }` (throws `notFound` for an unknown category slug)
   - `productRoutes(deps): Router`
+
+**Fix round 1 (post-review):** three issues found after the initial implementation, fixed together because they touch the same code:
+1. **Every product read 500'd when Redis was unreachable** (not just `redis: null`, but a real client whose commands reject). `getCachedProduct`/`getCachedProductPage`'s builders called `getVersions` unguarded; when `readThrough` degrades to its own unconditional bypass build (outside any try/catch it controls), that throw went uncaught. Fix: a `safeVersions` helper wraps every version read in `cached-reads.ts` and never throws; a value built from a failed read is stamped `cache: false` so it's served but never written to the cache.
+2. **Race**: `getCachedProduct` used to read `ver:category` *after* `fetchProductById`; a promotion committing (and bumping that version) in the gap would stamp stale data with the new version and serve it stale for up to the TTL. Fix: a cheap indexed `select category_id from products where id = $1` runs first, so both `ver:product` and `ver:category` are captured strictly before the price-affecting fetch — any bump during or after the fetch now makes the current version newer than what's stamped, which self-heals on the next read instead of serving stale data.
+3. **Round trips**: the warm path took three Redis round trips (GET entry, MGET versions, MGET stock) instead of the spec's two. Fix: `readThrough` gained an `extraKeys` option (keys MGET'd together with the entry on every read attempt) and lets `isFresh` return `{ fresh, extra }` to hand data back to the caller. Product detail now does MGET(`product:{id}`, `ver:product:{id}`) then, inside `isFresh`, MGET(`ver:category:{catId}`, `stock:{id}`) — handing the live stock value back so `ProductService.getProduct` skips its own `loadStocks` call on a warm hit. Lists do MGET(list entry, its version key) then, unchanged, one `loadStocks` MGET for the page's stock keys.
 
 - [ ] **Step 0: Pipeline error helper in core**
 
@@ -2261,12 +2267,14 @@ Refactor `bumpVersions` in `packages/core/src/cache/versions.ts` to call `throwO
 
 - [ ] **Step 1: Write the failing product read tests**
 
-`apps/api/test/products.test.ts`:
+`apps/api/test/products.test.ts` (final version, including the fix-round-1 tests appended after Step 5's initial 9):
 ```ts
-import { keys } from '@modaco/core';
+import { createRedis, keys } from '@modaco/core';
 import { promotions } from '@modaco/core';
+import type { Express } from 'express';
 import request from 'supertest';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createApp } from '../src/app';
 import { setupTestDeps, type TestContext } from './helpers';
 
 let ctx: TestContext;
@@ -2337,6 +2345,19 @@ describe('GET /products/:id', () => {
     expect(res.status).toBe(200);
     expect(res.body.stock).toBe(3);
   });
+
+  it('warm reads take exactly two redis round trips: entry+productVersion, then categoryVersion+stock', async () => {
+    await request(ctx.app).get(`/products/${belt.id}`); // cold: builds and caches the entry, backfills stock:{id}
+    const mgetSpy = vi.spyOn(ctx.redis, 'mget');
+    const getSpy = vi.spyOn(ctx.redis, 'get');
+    const res = await request(ctx.app).get(`/products/${belt.id}`);
+    expect(res.status).toBe(200);
+    expect(res.body.stock).toBe(3);
+    expect(getSpy).not.toHaveBeenCalled();
+    expect(mgetSpy).toHaveBeenCalledTimes(2);
+    mgetSpy.mockRestore();
+    getSpy.mockRestore();
+  });
 });
 
 describe('GET /products', () => {
@@ -2368,6 +2389,52 @@ describe('GET /products', () => {
     await ctx.redis.incr(keys.categoryVersion(acc.id));
     const after = await request(ctx.app).get('/products?category=accessories');
     expect(after.body.items.map((i: { effectivePrice: string }) => i.effectivePrice)).toEqual(['5.00', '10.00']);
+  });
+
+  it('warm reads take exactly two redis round trips: entry+version, then stock', async () => {
+    await request(ctx.app).get('/products'); // cold: builds and caches the page, backfills stock counters
+    const mgetSpy = vi.spyOn(ctx.redis, 'mget');
+    const getSpy = vi.spyOn(ctx.redis, 'get');
+    const res = await request(ctx.app).get('/products');
+    expect(res.status).toBe(200);
+    expect(res.body.pagination.total).toBe(3);
+    expect(getSpy).not.toHaveBeenCalled();
+    expect(mgetSpy).toHaveBeenCalledTimes(2);
+    mgetSpy.mockRestore();
+    getSpy.mockRestore();
+  });
+});
+
+describe('when redis is unreachable', () => {
+  let dead: ReturnType<typeof createRedis>;
+  let deadApp: Express;
+
+  beforeAll(() => {
+    dead = createRedis('redis://localhost:1');
+    dead.on('error', () => {}); // ioredis emits 'error' events; unhandled ones would throw
+    deadApp = createApp({ ...ctx.deps, redis: dead });
+  });
+  afterAll(() => dead.disconnect());
+
+  it('GET /products/:id still returns 200 with live price and stock from postgres', async () => {
+    const res = await request(deadApp).get(`/products/${belt.id}`);
+    expect(res.status).toBe(200);
+    expect(res.body.effectivePrice).toBe('20.00');
+    expect(res.body.stock).toBe(3);
+  });
+
+  it('GET /products still returns 200 with the full unfiltered page from postgres', async () => {
+    const res = await request(deadApp).get('/products');
+    expect(res.status).toBe(200);
+    expect(res.body.pagination.total).toBe(3);
+    expect(res.body.items.every((i: { stock: number }) => typeof i.stock === 'number')).toBe(true);
+  });
+
+  it('GET /products?category=... still returns 200 with the filtered, priced, stocked page from postgres', async () => {
+    const res = await request(deadApp).get('/products?category=accessories');
+    expect(res.status).toBe(200);
+    expect(res.body.items.map((i: { sku: string }) => i.sku)).toEqual(['HAT', 'BELT']);
+    expect(res.body.items.map((i: { stock: number }) => i.stock)).toEqual([0, 3]);
   });
 });
 ```
@@ -2451,19 +2518,43 @@ export async function setStock(deps: AppDeps, id: number, stock: number): Promis
 }
 ```
 
-`apps/api/src/products/cached-reads.ts`:
+Fix round 1 first extends `readThrough` itself (`packages/core/src/cache/read-through.ts`), in backward-compatible ways (all existing callers and tests keep working unchanged):
+- `BuildResult<T>` gains an optional `cache?: boolean` (default `true`); when the builder returns `cache: false`, the built value is still served but never written to Redis.
+- `ReadThroughOptions` gains `extraKeys?: string[]`: keys MGET'd together with the entry key on every read attempt (initial check and each poll retry), so a version check doesn't need a round trip of its own.
+- `isFresh` now receives a second argument, the raw `(string | null | undefined)[]` values of `extraKeys`, and may return either a plain `boolean` (unchanged) or `{ fresh: boolean; extra?: E }`; `extra` is handed back to the caller on `CacheOutcome.extra`, letting `isFresh` fetch something else (e.g. a live stock counter) in its own round trip and pass it upstream instead of making the caller fetch it again.
+
+`apps/api/src/products/cached-reads.ts` (final version, after fix round 1):
 ```ts
 import { eq } from 'drizzle-orm';
 import {
-  categories, fetchProductById, fetchProductPage, getVersions, keys, nextPromotionBoundary, readThrough,
-  SLUG_TTL_SECONDS, ttlSeconds, type ProductRecord, type SortDir,
+  categories, fetchProductById, fetchProductPage, getVersions, keys, nextPromotionBoundary, parseVersion, products,
+  readThrough, SLUG_TTL_SECONDS, ttlSeconds, type ProductRecord, type Redis, type SortDir,
 } from '@modaco/core';
 import type { AppDeps } from '../deps';
 
 interface ProductEntry { productVersion: number; categoryVersion: number; categoryId: number; record: ProductRecord }
 interface PageEntry { version: number; items: ProductRecord[]; total: number }
 
+export interface CachedProduct { record: ProductRecord; stock?: number }
+
 const onError = (deps: AppDeps) => (err: unknown) => deps.logger.warn({ err }, 'cache degraded; serving from postgres');
+
+/**
+ * Version reads must never throw, and a value built from a version read that failed must never be
+ * cached: a dead Redis client rejects the command outright (not just times out on a GET), and that
+ * happens inside the builder itself — which readThrough calls both from the lock-holder path and,
+ * unconditionally, from its own bypass fallback (outside any try/catch it controls) — so the
+ * failure has to be swallowed here rather than relying on readThrough's error handling.
+ */
+async function safeVersions(deps: AppDeps, redis: Redis | null, versionKeys: string[]): Promise<{ versions: number[]; ok: boolean }> {
+  if (!redis) return { versions: versionKeys.map(() => 0), ok: true };
+  try {
+    return { versions: await getVersions(redis, versionKeys), ok: true };
+  } catch (err) {
+    deps.logger.warn({ err }, 'version read failed while building cache entry; serving uncached');
+    return { versions: versionKeys.map(() => 0), ok: false };
+  }
+}
 
 export async function resolveCategoryId(deps: AppDeps, slug: string): Promise<number | null> {
   const { value } = await readThrough<number | null>(deps.redis, keys.categorySlug(slug), async () => {
@@ -2473,28 +2564,56 @@ export async function resolveCategoryId(deps: AppDeps, slug: string): Promise<nu
   return value;
 }
 
-export async function getCachedProduct(deps: AppDeps, id: number): Promise<ProductRecord | null> {
+export async function getCachedProduct(deps: AppDeps, id: number): Promise<CachedProduct | null> {
   const redis = deps.redis;
-  const { value } = await readThrough<ProductEntry | null>(redis, keys.product(id), async () => {
+  const { value, extra } = await readThrough<ProductEntry | null, number>(redis, keys.product(id), async () => {
     const now = deps.now();
-    const [productVersion] = redis ? await getVersions(redis, [keys.productVersion(id)]) : [0];
+    // The category id must be captured, and its version read, BEFORE the price-affecting fetch
+    // below: if we read the category version only after fetching, a promotion that commits (and
+    // bumps ver:category) in the gap between the fetch and that read would stamp data computed
+    // under the OLD promotion state with the NEW version number, and the entry would then read as
+    // fresh — serving stale prices for the rest of the TTL. Reading it first means any bump during
+    // or after the fetch makes the current version strictly newer than what's stamped, so isFresh
+    // correctly rejects it on the next read instead. The lookup is a cheap indexed PK read.
+    const [catRow] = await deps.db.select({ categoryId: products.categoryId }).from(products).where(eq(products.id, id));
+    if (!catRow) return { value: null, ttlSeconds: 5 };
+    const { versions, ok } = await safeVersions(deps, redis, [keys.productVersion(id), keys.categoryVersion(catRow.categoryId)]);
+    const [productVersion, categoryVersion] = versions;
     const record = await fetchProductById(deps.db, id, now);
     if (!record) return { value: null, ttlSeconds: 5 };
-    const [categoryVersion] = redis ? await getVersions(redis, [keys.categoryVersion(record.category.id)]) : [0];
+    // Defensive: if the product's category itself changed between the lookup above and this
+    // fetch (a rare admin operation, not a promotion bump), the version we captured belongs to
+    // the wrong category — don't cache that mismatch.
+    const categoryChanged = record.category.id !== catRow.categoryId;
     const boundary = await nextPromotionBoundary(deps.db, { productId: id, categoryId: record.category.id }, now);
     return {
       value: { productVersion: productVersion ?? 0, categoryVersion: categoryVersion ?? 0, categoryId: record.category.id, record },
       ttlSeconds: ttlSeconds(now, boundary),
+      cache: ok && !categoryChanged,
     };
   }, {
     onError: onError(deps),
-    isFresh: async (entry) => {
+    // Round trip 1 (on a hit): MGET(product:{id}, ver:product:{id}) — the entry and its own
+    // version together, so checking productVersion doesn't need a separate read.
+    extraKeys: [keys.productVersion(id)],
+    isFresh: async (entry, extraRaw) => {
       if (!entry || !redis) return true;
-      const [pv, cv] = await getVersions(redis, [keys.productVersion(id), keys.categoryVersion(entry.categoryId)]);
-      return entry.productVersion === pv && entry.categoryVersion === cv;
+      if (entry.productVersion !== parseVersion(extraRaw[0])) return false;
+      try {
+        // Round trip 2 (on a hit): MGET(ver:category:{catId}, stock:{id}) — the category version
+        // needed to confirm freshness (only known once the entry is parsed) bundled with the live
+        // stock counter, so the service can skip its own stock lookup on this path.
+        const [cvRaw, stockRaw] = await redis.mget(keys.categoryVersion(entry.categoryId), keys.stock(id));
+        if (entry.categoryVersion !== parseVersion(cvRaw)) return false;
+        return { fresh: true, extra: stockRaw == null ? undefined : Number(stockRaw) };
+      } catch (err) {
+        onError(deps)(err);
+        return false;
+      }
     },
   });
-  return value?.record ?? null;
+  if (!value) return null;
+  return { record: value.record, stock: extra };
 }
 
 export async function getCachedProductPage(
@@ -2505,19 +2624,20 @@ export async function getCachedProductPage(
   const versionKey = opts.categoryId === null ? keys.allVersion() : keys.categoryVersion(opts.categoryId);
   const { value } = await readThrough<PageEntry>(redis, keys.list(opts.categoryId, opts.sort, opts.page, opts.pageSize), async () => {
     const now = deps.now();
-    const [version] = redis ? await getVersions(redis, [versionKey]) : [0];
+    const { versions: [version], ok } = await safeVersions(deps, redis, [versionKey]);
     const page = await fetchProductPage(deps.db, {
       categoryId: opts.categoryId, sort: opts.sort, limit: opts.pageSize, offset: (opts.page - 1) * opts.pageSize, now,
     });
     const boundary = await nextPromotionBoundary(deps.db, { categoryId: opts.categoryId }, now);
-    return { value: { version: version ?? 0, ...page }, ttlSeconds: ttlSeconds(now, boundary) };
+    return { value: { version: version ?? 0, ...page }, ttlSeconds: ttlSeconds(now, boundary), cache: ok };
   }, {
     onError: onError(deps),
-    isFresh: async (entry) => {
-      if (!redis) return true;
-      const [v] = await getVersions(redis, [versionKey]);
-      return entry.version === v;
-    },
+    // Round trip 1 (on a hit): MGET(list entry, its version key) — the version key is known
+    // upfront (it only depends on the query's category, not on the fetched page), so it's bundled
+    // with the entry read. Stock is fetched separately by the caller once item ids are known
+    // (round trip 2), same as the cold-path fetch.
+    extraKeys: [versionKey],
+    isFresh: async (entry, extraRaw) => entry.version === parseVersion(extraRaw[0]),
   });
   return { items: value.items, total: value.total };
 }
@@ -2540,10 +2660,13 @@ export class ProductService {
   constructor(private readonly deps: AppDeps) {}
 
   async getProduct(id: number): Promise<ProductItem | null> {
-    const record = await getCachedProduct(this.deps, id);
-    if (!record) return null;
+    const cached = await getCachedProduct(this.deps, id);
+    if (!cached) return null;
+    // A warm cache hit already carries the live stock counter (fetched in the same round trip as
+    // the category-version freshness check); only fall back to a separate lookup when it doesn't.
+    if (cached.stock !== undefined) return { ...cached.record, stock: cached.stock };
     const stocks = await loadStocks(this.deps, [id]);
-    return { ...record, stock: stocks.get(id) ?? 0 };
+    return { ...cached.record, stock: stocks.get(id) ?? 0 };
   }
 
   async listProducts(q: ListQuery): Promise<{ items: ProductItem[]; pagination: { page: number; pageSize: number; total: number } }> {
@@ -2597,7 +2720,7 @@ Modify `apps/api/src/app.ts`: import `productRoutes` and add `app.use(productRou
 - [ ] **Step 5: Run tests**
 
 Run: `pnpm --filter @modaco/api test test/products.test.ts`
-Expected: PASS, 9 tests.
+Expected: PASS, 9 tests. (After fix round 1: PASS, 14 tests — 5 more added covering the redis-unreachable and round-trip-count fixes above.)
 
 - [ ] **Step 6: Commit**
 

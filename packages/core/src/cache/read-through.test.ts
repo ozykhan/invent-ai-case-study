@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRedis } from './redis';
 import { readThrough } from './read-through';
 
@@ -61,6 +61,37 @@ describe('readThrough', () => {
 
   it('works with a null redis', async () => {
     expect(await readThrough(null, 'k', async () => ({ value: 1, ttlSeconds: 1 }))).toEqual({ value: 1, source: 'bypass' });
+  });
+
+  it('fetches extraKeys in the same round trip as the entry and hands them to isFresh', async () => {
+    await redis.set('k', JSON.stringify({ v: 1 }));
+    await redis.set('ver', '7');
+    const mgetSpy = vi.spyOn(redis, 'mget');
+    const getSpy = vi.spyOn(redis, 'get');
+    const res = await readThrough(redis, 'k', async () => ({ value: { v: 99 }, ttlSeconds: 10 }), {
+      extraKeys: ['ver'],
+      isFresh: async (value, extraRaw) => extraRaw[0] === '7' && (value as { v: number }).v === 1,
+    });
+    expect(res).toEqual({ value: { v: 1 }, source: 'hit' });
+    expect(getSpy).not.toHaveBeenCalled();
+    expect(mgetSpy).toHaveBeenCalledTimes(1);
+    expect(mgetSpy).toHaveBeenCalledWith('k', 'ver');
+    mgetSpy.mockRestore();
+    getSpy.mockRestore();
+  });
+
+  it('lets isFresh hand extra data back to the caller alongside a hit', async () => {
+    await redis.set('k', JSON.stringify({ v: 1 }));
+    const res = await readThrough<{ v: number }, string>(redis, 'k', async () => ({ value: { v: 1 }, ttlSeconds: 10 }), {
+      isFresh: async () => ({ fresh: true, extra: 'side-channel' }),
+    });
+    expect(res).toEqual({ value: { v: 1 }, source: 'hit', extra: 'side-channel' });
+  });
+
+  it('skips writing to the cache when the builder marks the value cache: false', async () => {
+    const res = await readThrough(redis, 'k', async () => ({ value: { v: 1 }, ttlSeconds: 10, cache: false }), {});
+    expect(res).toEqual({ value: { v: 1 }, source: 'built' });
+    expect(await redis.get('k')).toBeNull();
   });
 
   it('falls back to the builder when a command stalls past commandTimeout', async () => {

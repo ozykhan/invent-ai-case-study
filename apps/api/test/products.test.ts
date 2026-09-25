@@ -1,7 +1,9 @@
-import { keys } from '@modaco/core';
+import { createRedis, keys } from '@modaco/core';
 import { promotions } from '@modaco/core';
+import type { Express } from 'express';
 import request from 'supertest';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createApp } from '../src/app';
 import { setupTestDeps, type TestContext } from './helpers';
 
 let ctx: TestContext;
@@ -72,6 +74,19 @@ describe('GET /products/:id', () => {
     expect(res.status).toBe(200);
     expect(res.body.stock).toBe(3);
   });
+
+  it('warm reads take exactly two redis round trips: entry+productVersion, then categoryVersion+stock', async () => {
+    await request(ctx.app).get(`/products/${belt.id}`); // cold: builds and caches the entry, backfills stock:{id}
+    const mgetSpy = vi.spyOn(ctx.redis, 'mget');
+    const getSpy = vi.spyOn(ctx.redis, 'get');
+    const res = await request(ctx.app).get(`/products/${belt.id}`);
+    expect(res.status).toBe(200);
+    expect(res.body.stock).toBe(3);
+    expect(getSpy).not.toHaveBeenCalled();
+    expect(mgetSpy).toHaveBeenCalledTimes(2);
+    mgetSpy.mockRestore();
+    getSpy.mockRestore();
+  });
 });
 
 describe('GET /products', () => {
@@ -103,5 +118,51 @@ describe('GET /products', () => {
     await ctx.redis.incr(keys.categoryVersion(acc.id));
     const after = await request(ctx.app).get('/products?category=accessories');
     expect(after.body.items.map((i: { effectivePrice: string }) => i.effectivePrice)).toEqual(['5.00', '10.00']);
+  });
+
+  it('warm reads take exactly two redis round trips: entry+version, then stock', async () => {
+    await request(ctx.app).get('/products'); // cold: builds and caches the page, backfills stock counters
+    const mgetSpy = vi.spyOn(ctx.redis, 'mget');
+    const getSpy = vi.spyOn(ctx.redis, 'get');
+    const res = await request(ctx.app).get('/products');
+    expect(res.status).toBe(200);
+    expect(res.body.pagination.total).toBe(3);
+    expect(getSpy).not.toHaveBeenCalled();
+    expect(mgetSpy).toHaveBeenCalledTimes(2);
+    mgetSpy.mockRestore();
+    getSpy.mockRestore();
+  });
+});
+
+describe('when redis is unreachable', () => {
+  let dead: ReturnType<typeof createRedis>;
+  let deadApp: Express;
+
+  beforeAll(() => {
+    dead = createRedis('redis://localhost:1');
+    dead.on('error', () => {}); // ioredis emits 'error' events; unhandled ones would throw
+    deadApp = createApp({ ...ctx.deps, redis: dead });
+  });
+  afterAll(() => dead.disconnect());
+
+  it('GET /products/:id still returns 200 with live price and stock from postgres', async () => {
+    const res = await request(deadApp).get(`/products/${belt.id}`);
+    expect(res.status).toBe(200);
+    expect(res.body.effectivePrice).toBe('20.00');
+    expect(res.body.stock).toBe(3);
+  });
+
+  it('GET /products still returns 200 with the full unfiltered page from postgres', async () => {
+    const res = await request(deadApp).get('/products');
+    expect(res.status).toBe(200);
+    expect(res.body.pagination.total).toBe(3);
+    expect(res.body.items.every((i: { stock: number }) => typeof i.stock === 'number')).toBe(true);
+  });
+
+  it('GET /products?category=... still returns 200 with the filtered, priced, stocked page from postgres', async () => {
+    const res = await request(deadApp).get('/products?category=accessories');
+    expect(res.status).toBe(200);
+    expect(res.body.items.map((i: { sku: string }) => i.sku)).toEqual(['HAT', 'BELT']);
+    expect(res.body.items.map((i: { stock: number }) => i.stock)).toEqual([0, 3]);
   });
 });

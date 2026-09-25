@@ -11,10 +11,13 @@ export class ProductService {
   constructor(private readonly deps: AppDeps) {}
 
   async getProduct(id: number): Promise<ProductItem | null> {
-    const record = await getCachedProduct(this.deps, id);
-    if (!record) return null;
+    const cached = await getCachedProduct(this.deps, id);
+    if (!cached) return null;
+    // A warm cache hit already carries the live stock counter (fetched in the same round trip as
+    // the category-version freshness check); only fall back to a separate lookup when it doesn't.
+    if (cached.stock !== undefined) return { ...cached.record, stock: cached.stock };
     const stocks = await loadStocks(this.deps, [id]);
-    return { ...record, stock: stocks.get(id) ?? 0 };
+    return { ...cached.record, stock: stocks.get(id) ?? 0 };
   }
 
   async listProducts(q: ListQuery): Promise<{ items: ProductItem[]; pagination: { page: number; pageSize: number; total: number } }> {
