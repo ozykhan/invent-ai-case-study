@@ -74,6 +74,8 @@ export async function runLoad(client: ApiClient, scenario: Scenario, o: RunOptio
   } finally {
     if (scenario.cleanup) await scenario.cleanup(client).catch((err: unknown) => io.log(`warning: cleanup failed: ${String(err)}`));
   }
+  // A scenario may stop early on an abort that no phase saw (e.g. between phases); never report that as a full run.
+  if (io.signal?.aborted) interrupted = true;
 
   return {
     scenario: scenario.name, target: client.baseUrl, startedAt, options: o.options,

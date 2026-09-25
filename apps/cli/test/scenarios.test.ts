@@ -141,6 +141,17 @@ describe('flash-sale', () => {
     expect(stub.state.hits.get('POST /products') ?? 0).toBe(0);
   });
 
+  it('reports an abort that lands between phases as interrupted, not as a pass', async () => {
+    const ac = new AbortController();
+    const spy: ApiClient = Object.create(client) as ApiClient;
+    spy.createPromotion = async (input) => { ac.abort(); return client.createPromotion(input); };
+    const doc = await runLoad(spy, createScenario('flash-sale', { maxPage: 5, category: 'shoes' }), opts({ durationMs: 300 }), { ...quiet, signal: ac.signal });
+    expect(doc.phases.map((p) => p.name)).toEqual(['before']);
+    expect(doc.checks).toEqual([]);
+    expect(doc.interrupted).toBe(true);
+    expect(stub.state.openPromotions.size).toBe(0);
+  });
+
   it('gives its promotion an end time just past the run, so a killed run cannot leave it on for long', async () => {
     const created: Array<{ startsAt: string; endsAt: string }> = [];
     const spy: ApiClient = Object.create(client) as ApiClient;
