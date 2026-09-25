@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "ingestion_rejections_job_chunk_line_uq" ON "ingestion_rejections" USING btree ("job_id","chunk_index","line_number");

@@ -93,4 +93,5 @@ export const ingestionRejections = pgTable('ingestion_rejections', {
   reason: text('reason').notNull(),
 }, (t) => [
   index('ingestion_rejections_job_idx').on(t.jobId),
+  uniqueIndex('ingestion_rejections_job_chunk_line_uq').on(t.jobId, t.chunkIndex, t.lineNumber),
 ]);

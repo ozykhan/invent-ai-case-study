@@ -95,3 +95,6 @@ CREATE INDEX "ingestion_rejections_job_idx" ON "ingestion_rejections" USING btre
 CREATE INDEX "products_category_base_price_idx" ON "products" USING btree ("category_id","base_price");
 CREATE INDEX "promotions_category_window_idx" ON "promotions" USING btree ("category_id","starts_at","ends_at") WHERE "promotions"."cancelled_at" is null;
 CREATE INDEX "promotions_product_window_idx" ON "promotions" USING btree ("product_id","starts_at","ends_at") WHERE "promotions"."cancelled_at" is null;
+
+-- 0001_fearless_anthem.sql
+CREATE UNIQUE INDEX "ingestion_rejections_job_chunk_line_uq" ON "ingestion_rejections" USING btree ("job_id","chunk_index","line_number");
