@@ -66,7 +66,7 @@ The root `package.json` gets `"modaco": "tsx apps/cli/src/main.ts"`, so `pnpm mo
 | `--json` | off | Print one JSON document to stdout; progress and warnings go to stderr |
 | `--timeout <duration>` | `10s` | Per-request timeout |
 
-Exit codes: `0` success, `1` API or check failure (non-2xx, failed assertion), `2` usage error (bad arguments).
+Exit codes: `0` success, `1` API or check failure (non-2xx, failed assertion), `2` usage error (bad arguments), `130` interrupted load run (SIGINT, §7.4).
 
 ## 5. Operational commands
 
@@ -204,7 +204,10 @@ At the end, the scenario cancels any promotion it created that is still open, fo
 
 ### 7.4 Interruption
 
-SIGINT stops scheduling and waits up to 5 s for in-flight requests. It then prints and writes the partial report with `"interrupted": true`, runs scenario cleanup, and exits 130.
+SIGINT stops scheduling and waits up to 5 s for in-flight requests. It then prints and writes the partial report with `"interrupted": true`, runs scenario cleanup, and exits 130. Requests still in flight after the 5 s are abandoned (the connection pool is destroyed), not awaited up to `--timeout`.
+
+- flash-sale interrupted during warmup or `before` stops there: no promotion, no mid-sale product, no check.
+- Promotions created by a load run (flash-sale, write-mix) end `--warmup` + `--duration` + 60 s after creation, so a run killed before its cleanup (a second Ctrl-C) leaves no discount active for long.
 
 ## 8. API change: `X-Instance-Id`
 
@@ -222,7 +225,7 @@ A middleware in `apps/api/src/middleware/instance-id.ts`, registered first in `c
 `infra/nginx/nginx.conf`:
 
 - `upstream api { server api-lb:3000; keepalive 256; }`. Docker's DNS returns every replica's address for `api-lb`, and nginx round-robins across them.
-- `proxy_http_version 1.1`, an empty `Connection` header (upstream keep-alive), and `proxy_set_header X-Request-Id $http_x_request_id`.
+- `proxy_http_version 1.1`, an empty `Connection` header (upstream keep-alive), and `proxy_set_header Host $host`.
 - `worker_processes auto`, `worker_connections 4096`, access log off (the load run is the measurement).
 - nginx resolves `api-lb` once at startup. After changing the replica count, run `docker compose restart nginx`.
 

@@ -101,7 +101,9 @@ Results from one run are in ADR.md sections 5 and 6.
 
 ## CLI (`pnpm modaco`)
 
-`apps/cli` is a command-line client for every endpoint plus a load generator. It needs only a base URL (`--url`, else `API_URL`, else `http://localhost:3000`), so it works the same against one local API, the nginx load balancer below, or a remote deployment. Every command takes `--json` and then prints one JSON document to stdout. Exit codes: 0 ok, 1 API/check/transport failure, 2 usage error, 130 interrupted.
+`apps/cli` is a command-line client for every endpoint plus a load generator. It needs only a base URL (`--url`, else `API_URL`, else `http://localhost:3000`), so it works the same against one local API, the nginx load balancer below, or a remote deployment. Every command takes `--json` and then prints one JSON document to stdout; `health --watch` is the exception and prints one JSON line per poll. Exit codes: 0 ok, 1 API/check/transport failure, 2 usage error, 130 interrupted load run.
+
+Ctrl-C on a load run stops scheduling, waits up to 5 s for in-flight requests, runs cleanup and reports what was measured with `"interrupted": true`. The CLI exits 130, but through `pnpm modaco` a Ctrl-C in a terminal also reaches pnpm, which prints `ELIFECYCLE Command failed with exit code 130` and can still exit 0 to the shell. Scripts that depend on the exit code should call the CLI directly from the repo root, `node --import tsx apps/cli/src/main.ts load …`, or check `"interrupted"` in the `--json`/`--out` document. Promotions a load run creates end a minute after the run would, so a run killed before its cleanup leaves no discount on for long.
 
 ```bash
 pnpm modaco health                                        # status, checks and the answering instance
@@ -128,12 +130,12 @@ pnpm modaco load browse --rate 2000/s --ramp 30s --duration 90s --out tmp/run.js
 ```
 
 - **Scenarios.**
-  - `browse`: category listings with random page and sort, plus product details (`--mix list=70,detail=30`, `--max-page 5`, `--category`).
+  - `browse`: category listings with random page and sort, plus product details (`--mix list=70,detail=30`, `--max-page 5` (at most 1000, the API's page limit), `--category`).
   - `write-mix`: reads plus stock writes plus promotion create/cancel cycles that bump cache versions (`--mix list=60,detail=25,stock=14,promo=1`).
   - `flash-sale`: the `demo:flash-sale` flow on the load engine. It records a `before` and an `after` phase and checks that a product created mid-sale reads back at half price; the run exits 1 if that check fails.
 - **Models.** `--rate` holds a constant arrival rate and times each request from its scheduled start, so a stalling server is charged for the requests it delayed (no coordinated omission). Requests over `--max-inflight` (default 10000) are counted as `dropped`. `--concurrency` runs fixed workers, which is useful for finding saturation throughput.
 - **Output.** Per label and in total: count, req/s, p50/p90/p95/p99/p99.9/max in ms, status codes, transport errors (timeout, ECONNRESET, ECONNREFUSED) and drops. Also the share of responses served by each `X-Instance-Id`. `--json` or `--out` gives the full result document for comparing runs.
-- **Repeatability.** `--seed` makes the request sequence repeatable. Setup samples up to 20 listing pages to find product ids and categories, so the catalog must not be empty.
+- **Repeatability.** `--seed` makes the request sequence repeatable for `browse` and `flash-sale`. In `write-mix` the reads and stock writes follow the seed, but whether a promo slot creates or cancels depends on which earlier creates have answered, so that part varies with response timing. Setup samples up to 20 listing pages to find product ids and categories, so the catalog must not be empty.
 
 ### Several API replicas behind nginx
 
@@ -141,11 +143,13 @@ pnpm modaco load browse --rate 2000/s --ramp 30s --duration 90s --out tmp/run.js
 docker compose up -d postgres redis localstack && pnpm db:migrate && pnpm seed   # if not done already
 docker compose --profile lb up --build -d --scale api-lb=4                       # 4 replicas + nginx on :8080
 pnpm modaco --url http://localhost:8080 health --watch 1s                        # instance id rotates
-pnpm modaco --url http://localhost:8080 load browse --rate 2000/s --duration 60s --out tmp/lb-4.json
+pnpm modaco --url http://localhost:8080 load browse --concurrency 100 --duration 20s --out tmp/lb-4.json
 
 docker compose --profile lb up -d --scale api-lb=1 && docker compose restart nginx   # nginx resolves replicas at startup
-pnpm modaco --url http://localhost:8080 load browse --rate 2000/s --duration 60s --out tmp/lb-1.json
+pnpm modaco --url http://localhost:8080 load browse --concurrency 100 --duration 20s --out tmp/lb-1.json
 ```
+
+These use the closed model because it measures how much throughput each configuration can take. With `--rate` the throughput is fixed by the flag, so a 1 vs N replica comparison only shows up in latency (and in drops once one side saturates).
 
 - Each replica is limited to `API_CPUS` cores (default 1), so adding replicas adds capacity instead of sharing every host core.
 - The API sets `X-Instance-Id` on every response: `INSTANCE_ID` if set, else the hostname, which is the container id under Compose. It exposes nothing beyond that hostname; drop the middleware if the API is ever public.
