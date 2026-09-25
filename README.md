@@ -44,7 +44,9 @@ Everything is read from environment variables; `.env.example` lists them with th
 | `DB_STATEMENT_TIMEOUT_MS` | `5000` | Postgres `statement_timeout` on every API connection. A cancelled statement (SQLSTATE 57014) is also a 503 `overloaded`. `0` disables it. |
 | `DB_JIT` | `off` | Postgres JIT for the API's connections (`on`/`off`). It added 83 to 131 ms to every cold listing build (ADR §4). |
 
-Keep the worst-case bounded cache build, three sequential queries of at most acquire + statement timeout each (21 s with the defaults), below the 30 s cache lock TTL (ADR §4). If the lock expired under a live build, its waiters would take over and build again.
+Keep the worst-case bounded cache build, three sequential queries of at most acquire + statement timeout each (21 s with the defaults), below the 30 s cache lock TTL (ADR §4). If the lock expired under a live build, its waiters would take over and build again. The API logs a warning at startup when the timeouts break that bound.
+
+JIT and the statement timeout are sent as connection startup parameters. An `options` query parameter in `DATABASE_URL` (`?options=...`) replaces the JIT setting. PgBouncer refuses these parameters unless they are listed in its `ignore_startup_parameters`, and then drops them. Behind a pooler, set them on the database role instead: `ALTER ROLE modaco SET jit = off; ALTER ROLE modaco SET statement_timeout = '5s';`.
 
 ## Endpoints
 
@@ -170,7 +172,7 @@ These use the closed model because it measures how much throughput each configur
 - Each replica holds a Postgres pool of 10 and Postgres allows 100 connections by default, so up to about 9 replicas fit. More need `max_connections` raised or a pooler (PgBouncer; RDS Proxy on AWS).
 - Postgres, Redis, nginx, the replicas and the load generator share this machine's CPUs. Local runs compare configurations (1 vs N replicas); they do not predict production capacity.
 - Stop the replicas with `docker compose --profile lb stop api-lb nginx`.
-- Measured on an M4 Pro Mac (one 6-CPU Docker Desktop VM shared by all containers) with the 500k-product catalog, three interleaved `load browse --concurrency 100 --duration 60s` runs each. 1 replica: 7,016 ± 95 req/s, p99 37.0 ms. 4 replicas: 14,134 ± 1,884 req/s (2.0×), p99 37.2 ms, requests split exactly 25% per replica. At a fixed 4,900 req/s, p99 was 52 ms to 4.8 s with 1 replica (pinned at its CPU limit) and 2.5 ms with 4. Starting from an empty cache at that rate, 4 replicas used to collapse; they now shed 5.4% of requests as 503s in the first 15 to 20 s and then hold the rate. Analysis in [ADR.md §11](ADR.md#11-horizontal-scaling-1-vs-4-replicas-behind-nginx); method and raw results in [`docs/load-tests/2026-09-25-rerun/`](docs/load-tests/2026-09-25-rerun/summary.md).
+- Measured on an M4 Pro Mac (one 6-CPU Docker Desktop VM shared by all containers) with the 500k-product catalog, three interleaved `load browse --concurrency 100 --duration 60s` runs each. 1 replica: 7,016 ± 95 req/s, p99 37.0 ms. 4 replicas: 14,134 ± 1,884 req/s (2.0×), p99 37.2 ms, requests split exactly 25% per replica. At a fixed 4,900 req/s, p99 was 52 ms to 4.8 s with 1 replica (pinned at its CPU limit) and 2.5 ms with 4. Starting from an empty cache at that rate, 4 replicas used to collapse. They now leave about 13% of the offered requests unserved in the first 15 to 20 s (503s for 5.4% of the requests sent, and 7.9% dropped by the client at its in-flight limit), and then hold the rate. Analysis in [ADR.md §11](ADR.md#11-horizontal-scaling-1-vs-4-replicas-behind-nginx); method and raw results in [`docs/load-tests/2026-09-25-rerun/`](docs/load-tests/2026-09-25-rerun/summary.md).
 
 ## Tests
 

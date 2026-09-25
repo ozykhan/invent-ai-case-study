@@ -284,13 +284,19 @@ Three changes (ADR §4 and §11):
 - **JIT off** for the API's connections (`DB_JIT`, default off).
 
 The first 4-replica run with only the first version of the coalescing change (waiters still built directly whenever
-the lock was released without an entry; `*-open-4r-coldstart-fixed-attempt1.*`) failed 71% of requests. A holder whose
+the lock was released without an entry; `*-open-4r-coldstart-fixed-attempt1.*`) failed 71% of the requests sent (135,340
+of 190,418); counting the 103,583 the client dropped, 81% of the 294,001 offered went unserved. A holder whose
 pool acquire timed out released its lock, all its waiters built directly and uncached, and their queries starved the
 next holder: about 1,330 page queries ran in the recorded phase and about 57k more failed in the pool queue, for 80
 keys. The takeover rule above closed that path.
 
-**Before and after, cold cache, open model, `--warmup 0s --seed 42`.** Before is `main` at db02519 (1 replica from the
-investigation, 4 replicas from `open-4r-coldstart-failed.*`). After is this branch at `add1e75`. Latency in ms over 2xx
+**Before and after, cold cache, open model, `--seed 42`.** Before is `main` at db02519 (1 replica from the
+investigation, 4 replicas from `open-4r-coldstart-failed.*`). After is this branch at `add1e75`. The warm-up differs:
+the 1-replica runs and every "after" run used `--warmup 0s`, so they record from the first request, cold fill
+included. The 4-replica "before" run used `--warmup 15s`, so its 60 s window began 15 s into the collapse and left
+the first 15 s out.
+
+All "after" numbers were measured at `add1e75`, before the review fixes (notably waiters that stop when their client disconnects), which were not re-measured. Latency in ms over 2xx
 responses; "page queries" counts cold listing queries in the recorded phase (`products` sequential scans in
 `pg_stat_user_tables`, sampled every second in `pgmon-*-fixed.txt`, from the first sample of the recorded phase).
 
@@ -299,16 +305,17 @@ responses; "page queries" counts cold listing queries in the recorded phase (`pr
 | 1 replica, 300/s, before | 9,000 | 314 | 0 | 8,686 timeouts | 0 | – | – | – | 3,019 | after about 81 s |
 | 1 replica, 300/s, after | 9,000 | 9,000 | 0 | 0 | 0 | 1.35 | 1,866.75 | 2,033.66 | 87 | at the first sample (under 1 s) |
 | 1 replica, 1,225/s, after | 36,751 | 36,751 | 0 | 0 | 0 | 0.60 | 2,256.90 | 2,482.18 | 86 | at the first sample |
-| 4 replicas, 4,900/s, before | 294,001 | 7 | 0 | 46,541 | 247,453 | 1,233.92 | 5,652.48 | 5,652.48 | – | not within 5 min; restart needed |
-| 4 replicas, 4,900/s, attempt 1 | 294,001 | 55,078 | 135,214 | 126 | 103,583 | 56.99 | 6,221.82 | 8,953.86 | about 1,330 | at the first sample |
+| 4 replicas, 4,900/s, before (`--warmup 15s`) | 294,001 | 7 | 0 | 46,541 | 247,453 | 1,233.92 | 5,652.48 | 5,652.48 | – | not within 5 min; restart needed |
+| 4 replicas, 4,900/s, attempt 1 (`82b4773`) | 294,001 | 55,078 | 135,214 | 126 | 103,583 | 56.99 | 6,221.82 | 8,953.86 | about 1,330 | at the first sample |
 | 4 replicas, 4,900/s, after | 294,001 | 256,131 | 14,652 | 46 timeouts | 23,172 | 1.05 | 5,378.05 | 7,389.18 | 138 | at the first sample |
 
 - **1 replica.** No errors at either rate. The whole tail is the cold fill: the cache was full within about 2 s, and
   from the 10 s progress line on, p99 was 2.5 to 7.8 ms. Postgres had 0 active queries in the first sample after the
   client exited (`drain-open-1r-coldstart-{300,1225}-fixed.txt`). Each 1-replica run used a fresh dev API process
   (`node --import tsx src/server.ts` in `apps/api`).
-- **4 replicas.** 87% of the offered 294,001 requests succeeded (94.6% of those sent), against 7 before. The errors and
-  drops are the first 15 to 20 s: 8,923 cache waits that hit 5 s and 5,731 pool acquire timeouts in the replica
+- **4 replicas.** 87.1% of the offered 294,001 requests succeeded (94.6% of the 270,829 sent), against 7 before. So
+  12.9% of the offered requests went unserved: 503s and timeouts for 5.4% of those sent, and 23,172 (7.9% of offered)
+  dropped by the client at its 10,000 in-flight limit. The errors and drops are the first 15 to 20 s: 8,923 cache waits that hit 5 s and 5,731 pool acquire timeouts in the replica
   logs, and no statement timeouts (per replica in `drain-open-4r-coldstart-fixed.txt`). All but 4 page queries had run
   16 s into the run. From 20 s on the run held 4,900 req/s with 0 to 18 errors per 5 s and p99 of 3 to 21 ms after the 25 s line. During the
   fill the replicas were pinned at their 1-CPU limit (92 to 98%) while Postgres dropped to 52%, so the fill was then
