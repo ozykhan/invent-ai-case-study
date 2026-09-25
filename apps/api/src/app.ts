@@ -1,5 +1,6 @@
 import express, { type Express } from 'express';
 import type { AppDeps } from './deps';
+import { ingestionRoutes } from './ingestion/routes';
 import { errorHandler } from './middleware/error-handler';
 import { requestId } from './middleware/request-id';
 import { productRoutes } from './products/routes';
@@ -14,6 +15,7 @@ export function createApp(deps: AppDeps): Express {
   app.use(healthRoutes(deps));
   app.use(productRoutes(deps));
   app.use(promotionRoutes(deps));
+  app.use(ingestionRoutes(deps));
   app.use((_req, res) => res.status(404).json({ error: { code: 'not_found', message: 'route not found' } }));
   app.use(errorHandler(deps.logger));
   return app;
