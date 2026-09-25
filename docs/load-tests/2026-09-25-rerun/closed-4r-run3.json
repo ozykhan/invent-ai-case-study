@@ -1,0 +1,88 @@
+{
+  "scenario": "browse",
+  "target": "http://localhost:8080",
+  "startedAt": "2026-09-25T16:28:14.762Z",
+  "options": {
+    "model": "closed",
+    "concurrency": 100,
+    "durationMs": 60000,
+    "warmupMs": 15000,
+    "connections": 100,
+    "timeoutMs": 10000,
+    "seed": 42,
+    "maxPage": 5,
+    "maxErrorRate": 0
+  },
+  "phases": [
+    {
+      "name": "main",
+      "elapsedSeconds": 60,
+      "total": {
+        "count": 919291,
+        "rps": 15320.5,
+        "latencyMs": {
+          "mean": 6.53,
+          "p50": 3.38,
+          "p90": 22.13,
+          "p95": 31.22,
+          "p99": 36.61,
+          "p999": 41.82,
+          "max": 77.63
+        },
+        "status": {
+          "200": 919291
+        },
+        "errors": {},
+        "dropped": 0
+      },
+      "byLabel": {
+        "detail": {
+          "count": 276330,
+          "rps": 4605.2,
+          "latencyMs": {
+            "mean": 5.58,
+            "p50": 2.89,
+            "p90": 19.17,
+            "p95": 25.97,
+            "p99": 30.9,
+            "p999": 35.2,
+            "max": 77.02
+          },
+          "status": {
+            "200": 276330
+          },
+          "errors": {},
+          "dropped": 0
+        },
+        "list": {
+          "count": 642961,
+          "rps": 10715.3,
+          "latencyMs": {
+            "mean": 6.93,
+            "p50": 3.63,
+            "p90": 25.79,
+            "p95": 32.69,
+            "p99": 37.34,
+            "p999": 42.56,
+            "max": 77.63
+          },
+          "status": {
+            "200": 642961
+          },
+          "errors": {},
+          "dropped": 0
+        }
+      }
+    }
+  ],
+  "instances": {
+    "12b6dcee0155": 229823,
+    "41edcf57b0db": 229823,
+    "5f9f91816f60": 229823,
+    "d0ff825d0ddd": 229822
+  },
+  "checks": [],
+  "notes": {},
+  "interrupted": false,
+  "ok": true
+}

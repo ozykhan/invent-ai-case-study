@@ -1,0 +1,105 @@
+{
+  "scenario": "browse",
+  "target": "http://localhost:8080",
+  "startedAt": "2026-09-25T16:31:05.116Z",
+  "options": {
+    "model": "open",
+    "rate": 4900,
+    "rampMs": 0,
+    "maxInflight": 10000,
+    "durationMs": 60000,
+    "warmupMs": 15000,
+    "connections": 10000,
+    "timeoutMs": 10000,
+    "seed": 42,
+    "maxPage": 5,
+    "maxErrorRate": 0
+  },
+  "phases": [
+    {
+      "name": "main",
+      "elapsedSeconds": 60,
+      "total": {
+        "count": 7,
+        "rps": 0.1,
+        "latencyMs": {
+          "mean": 2096.6,
+          "p50": 1233.92,
+          "p90": 5652.48,
+          "p95": 5652.48,
+          "p99": 5652.48,
+          "p999": 5652.48,
+          "max": 5650.79
+        },
+        "status": {
+          "200": 7
+        },
+        "errors": {
+          "timeout": 42732,
+          "other": 3401,
+          "ECONNRESET": 408
+        },
+        "dropped": 247453
+      },
+      "byLabel": {
+        "detail": {
+          "count": 7,
+          "rps": 0.1,
+          "latencyMs": {
+            "mean": 2096.6,
+            "p50": 1233.92,
+            "p90": 5652.48,
+            "p95": 5652.48,
+            "p99": 5652.48,
+            "p999": 5652.48,
+            "max": 5650.79
+          },
+          "status": {
+            "200": 7
+          },
+          "errors": {
+            "timeout": 12884,
+            "other": 1030,
+            "ECONNRESET": 118
+          },
+          "dropped": 74261
+        },
+        "list": {
+          "count": 0,
+          "rps": 0,
+          "latencyMs": {
+            "mean": 0,
+            "p50": 0,
+            "p90": 0,
+            "p95": 0,
+            "p99": 0,
+            "p999": 0,
+            "max": 0
+          },
+          "status": {},
+          "errors": {
+            "timeout": 29848,
+            "other": 2371,
+            "ECONNRESET": 290
+          },
+          "dropped": 173192
+        }
+      }
+    }
+  ],
+  "instances": {
+    "12b6dcee0155": 1,
+    "41edcf57b0db": 3,
+    "d0ff825d0ddd": 3
+  },
+  "checks": [
+    {
+      "name": "error rate",
+      "ok": false,
+      "message": "99.98% (46541 of 46548) > --max-error-rate 0.00%"
+    }
+  ],
+  "notes": {},
+  "interrupted": false,
+  "ok": false
+}

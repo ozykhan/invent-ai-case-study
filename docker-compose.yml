@@ -1,3 +1,6 @@
+# Pinned so every checkout (and every worktree) attaches to the same stack instead of one named after its directory.
+name: modaco-api
+
 # Shared by the single "api" service (profile app, port 3000) and the scalable "api-lb" service (profile lb).
 x-api: &api
   build: .

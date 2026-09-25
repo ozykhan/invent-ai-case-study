@@ -126,7 +126,8 @@ describe('load command', () => {
     expect(r.stdout).toContain('phase main');
     expect(r.stdout).toContain('instances (3)');
     const doc = JSON.parse(readFileSync(out, 'utf8')) as { options: Record<string, unknown>; phases: Array<{ total: { count: number } }> };
-    expect(doc.options).toMatchObject({ model: 'open', rate: 200, connections: 256, maxInflight: 10000 });
+    // connections defaults to rate * (--timeout in seconds), floored at 256 and capped at --max-inflight: 200 * 10s = 2000.
+    expect(doc.options).toMatchObject({ model: 'open', rate: 200, connections: 2000, maxInflight: 10000 });
     expect(doc.phases[0]!.total.count).toBeGreaterThanOrEqual(90);
   });
 
@@ -151,6 +152,7 @@ describe('load command', () => {
       [['load', 'browse', '--concurrency', '1', '--mix', 'stock=1'], "unknown mix label 'stock'"],
       [['load', 'browse', '--rate', 'fast'], 'invalid rate'],
       [['load', 'browse', '--concurrency', '1', '--max-page', '1001'], '--max-page must be <= 1000'],
+      [['load', 'browse', '--concurrency', '1', '--max-error-rate', '2'], 'invalid --max-error-rate'],
     ];
     for (const [args, message] of cases) {
       const r = await runCli(['--url', stub.url, ...args]);
@@ -158,4 +160,76 @@ describe('load command', () => {
       expect(r.stderr, args.join(' ')).toContain(message);
     }
   });
+
+  it('counts 5xx as errors and fails the run by default, but --max-error-rate can accept them', async () => {
+    const down = await startStubApi({ failStatus: 503 });
+    try {
+      const r = await runCli(['--url', down.url, '--json', 'load', 'browse', '--concurrency', '4', '--duration', '300ms', '--warmup', '0s']);
+      expect(r.code).toBe(1);
+      const doc = JSON.parse(r.stdout) as {
+        ok: boolean;
+        phases: Array<{ total: { count: number; errors: Record<string, number>; status: Record<string, number> } }>;
+        checks: Array<{ name: string; ok: boolean }>;
+      };
+      expect(doc.ok).toBe(false);
+      const total = doc.phases[0]!.total;
+      expect(total.count).toBe(0); // no 2xx/3xx responses at all: 503 is kept out of the success histogram
+      expect(total.errors.serverError).toBeGreaterThan(0);
+      expect(total.status['503']).toBe(total.errors.serverError);
+      expect(doc.checks).toContainEqual(expect.objectContaining({ name: 'error rate', ok: false }));
+
+      const tolerant = await runCli(['--url', down.url, 'load', 'browse', '--concurrency', '4', '--duration', '300ms', '--warmup', '0s', '--max-error-rate', '1']);
+      expect(tolerant.code).toBe(0);
+      expect(tolerant.stdout).toContain('PASS error rate');
+    } finally {
+      await down.close();
+    }
+  });
+
+  it('SIGINT during a load run exits 130 (not by signal) and leaves no open promotions on the stub', async () => {
+    // Its own stub, not the shared one: other tests in this file leave promotions open on purpose (e.g. the
+    // retargeting test above never cancels its promotion), so asserting a global 0 against the shared stub would
+    // depend on test order instead of on this run's own cleanup.
+    const own = await startStubApi();
+    try {
+      const child = execFile(
+        process.execPath,
+        ['--import', 'tsx', 'src/main.ts', '--url', own.url, 'load', 'write-mix', '--concurrency', '8', '--duration', '10s', '--warmup', '0s', '--mix', 'promo=1'],
+        { cwd: cliDir, env: { ...process.env, API_URL: '' } },
+      );
+      // Attached before anything else can happen, so a fast exit is never missed.
+      const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+        child.once('exit', (code, signal) => resolve({ code, signal }));
+      });
+
+      // Proof the load phase actually started -- not a blind sleep, which either races tsx's startup time on a
+      // loaded machine (too short) or sends SIGINT well after the run is already underway (too long, and closer to
+      // testing the drain path than the "abort while running" path this test is for).
+      await new Promise<void>((resolve, reject) => {
+        let buf = '';
+        const onData = (chunk: Buffer) => {
+          buf += chunk.toString();
+          if (buf.includes('phase main')) cleanup(resolve);
+        };
+        const onExit = (code: number | null) => cleanup(() => reject(new Error(`child exited (code ${code}) before the load phase started; stderr/stdout so far:\n${buf}`)));
+        const cleanup = (then: () => void) => {
+          child.stdout?.off('data', onData);
+          child.stderr?.off('data', onData);
+          child.off('exit', onExit);
+          then();
+        };
+        child.stdout?.on('data', onData);
+        child.stderr?.on('data', onData);
+        child.once('exit', onExit);
+      });
+
+      child.kill('SIGINT');
+      const { code, signal } = await exited;
+      expect(code).toBe(130);
+      expect(signal).toBeNull();
+      expect(own.state.openPromotions.size).toBe(0);
+    } finally {
+      await own.close();
+    }
+  }, 15_000);
 });

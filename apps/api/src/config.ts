@@ -9,7 +9,9 @@ const schema = z.object({
   S3_PUBLIC_ENDPOINT: z.string().default('http://localhost:4566'),
   S3_BUCKET: z.string().default('modaco-vendor-uploads'),
   LOG_LEVEL: z.string().default('info'),
-  INSTANCE_ID: z.string().min(1).optional(),
+  // An empty string (e.g. INSTANCE_ID="" from an unset compose/k8s substitution) is treated the same as unset,
+  // rather than failing min(1) validation: it still falls back to the hostname below.
+  INSTANCE_ID: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
 });
 
 export interface Config {

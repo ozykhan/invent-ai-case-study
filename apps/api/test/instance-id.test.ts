@@ -20,4 +20,8 @@ describe('instance id', () => {
     expect(loadConfig({ INSTANCE_ID: 'api-1' }).instanceId).toBe('api-1');
     expect(loadConfig({}).instanceId).toBe(hostname());
   });
+
+  it('treats an empty INSTANCE_ID as unset instead of failing config validation', () => {
+    expect(loadConfig({ INSTANCE_ID: '' }).instanceId).toBe(hostname());
+  });
 });

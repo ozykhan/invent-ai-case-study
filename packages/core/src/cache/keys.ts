@@ -7,6 +7,13 @@ export const DEFAULT_TTL_SECONDS = 300;
  */
 export const STOCK_TTL_SECONDS = 300;
 export const SLUG_TTL_SECONDS = 300;
+/**
+ * Short TTL for negative/empty cache entries: a missing product, a missing category slug, or a
+ * list page past the end of the result set. These are cheap to recompute, so the TTL only needs
+ * to bound how long a stale "not found"/"empty" answer can outlive the write that would fix it
+ * (version validation invalidates it sooner, when the write bumps a version this entry depends on).
+ */
+export const NOT_FOUND_TTL_SECONDS = 5;
 
 export const keys = {
   productVersion: (id: number) => `ver:product:${id}`,

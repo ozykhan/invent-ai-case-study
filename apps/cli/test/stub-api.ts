@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import type { Product } from '../src/api-types';
+import { discountedPrice } from '../src/money';
 
 /** The id POST /products returns; GET of it reads back with the stub's mid-sale price and the latest promotion. */
 export const MIDSALE_ID = 900001;
@@ -27,7 +29,7 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown> |
   return text ? (JSON.parse(text) as Record<string, unknown>) : undefined;
 }
 
-const product = (id: number) => {
+const product = (id: number): Product => {
   const slug = SLUGS[id % SLUGS.length]!;
   return {
     id, sku: `SKU-${id}`, name: `Product ${id}`,
@@ -36,8 +38,29 @@ const product = (id: number) => {
   };
 };
 
+/**
+ * If `lastPromotionId` names a live (uncancelled) promotion that targets this product's category or id, overrides
+ * its effectivePrice/activePromotion the same way the real API's listing would -- so a scenario's "did the listing
+ * pick up the promo" check has something real to observe, not just the single-product GET path.
+ */
+function withActivePromotion(
+  p: Product, lastPromotionId: string | undefined, promotionsById: Map<string, Record<string, unknown>>,
+): Product {
+  const promo = lastPromotionId ? promotionsById.get(lastPromotionId) : undefined;
+  if (!promo || promo.cancelledAt) return p;
+  const target = promo.target as { categoryId?: number; productId?: number } | undefined;
+  if (target?.categoryId !== p.category.id && target?.productId !== p.id) return p;
+  const discountType = promo.discountType as 'percentage' | 'fixed';
+  return {
+    ...p, effectivePrice: discountedPrice(p.basePrice, discountType, promo.value as string),
+    activePromotion: { id: promo.id as string, name: promo.name as string, discountType, value: promo.value as string },
+  };
+}
+
 /** A fake ModaCo API: a catalog of `total` products and in-memory promotions. Rotates X-Instance-Id over i1, i2, i3. */
-export async function startStubApi(opts: { total?: number; degraded?: boolean; midSalePrice?: string } = {}): Promise<StubApi> {
+export async function startStubApi(
+  opts: { total?: number; degraded?: boolean; midSalePrice?: string; listingIgnoresPromotions?: boolean; failStatus?: number } = {},
+): Promise<StubApi> {
   const total = opts.total ?? 1000;
   const state: StubState = { hits: new Map(), samplePages: 0, openPromotions: new Set() };
   const promotionsById = new Map<string, Record<string, unknown>>();
@@ -57,6 +80,15 @@ export async function startStubApi(opts: { total?: number; degraded?: boolean; m
     state.hits.set(route, (state.hits.get(route) ?? 0) + 1);
     const segment = url.pathname.split('/')[2] ?? '';
 
+    // Simulates a target that fails every request the load engine itself sends (a listing at the engine's own
+    // pageSize=20, or any single-product GET), while leaving setup's own catalog sampling (pageSize 100 or 1) alone
+    // -- so a scenario can still start, and a test can prove the load engine counts 5xx as errors instead of
+    // silently mixing them into the success stats.
+    if (opts.failStatus !== undefined) {
+      const isSetupSampling = route === 'GET /products' && Number(url.searchParams.get('pageSize') ?? 20) !== 20;
+      if (!isSetupSampling) return send(opts.failStatus, { error: { code: 'stub_failure', message: `stub always fails with ${opts.failStatus}` } });
+    }
+
     switch (route) {
       case 'GET /health':
         return opts.degraded
@@ -67,7 +99,9 @@ export async function startStubApi(opts: { total?: number; degraded?: boolean; m
         const pageSize = Number(url.searchParams.get('pageSize') ?? 20);
         if (pageSize === 100) state.samplePages++;
         const items = [];
-        for (let id = (page - 1) * pageSize + 1; id <= Math.min(total, page * pageSize); id++) items.push(product(id));
+        for (let id = (page - 1) * pageSize + 1; id <= Math.min(total, page * pageSize); id++) {
+          items.push(opts.listingIgnoresPromotions ? product(id) : withActivePromotion(product(id), state.lastPromotionId, promotionsById));
+        }
         return send(200, { items, pagination: { page, pageSize, total } });
       }
       case 'GET /products/:id': {

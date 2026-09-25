@@ -61,12 +61,13 @@ Where a simpler and a more rigorous option existed, this project took the simple
 - **Embedded versions.** Keys are not version-stamped. Each entry stores the versions it was built under: `product:{id}` holds `{productVersion, categoryVersion, categoryId, record}`, `list:{cat|all}:{sort}:{page}:{size}` holds `{version, items, total}`. A read compares them against the live counters; a mismatch is treated as a miss and the entry is overwritten.
 - **Warm path round trips.** Product detail takes two: `MGET(product:{id}, ver:product:{id})`, then `MGET(ver:category:{cid}, stock:{id})`. A listing takes two: `MGET(entry, version)`, then `MGET` of the page's stock counters. A category-filtered listing adds a slug lookup, so three.
 - **Build order.** On a rebuild, the category version is read before the price query runs. If it were read after, a promotion committing in between would stamp old prices with the new version and they would look fresh for the whole TTL.
-- **Stock is kept out of catalog entries.** It lives in `stock:{id}` counters with a 300 s TTL, the same bound as the cache entries. A miss reads Postgres and backfills with `SET NX`, so a backfill never overwrites a counter written after its read. Every stock write and ingestion batch sets the counter after its commit; if that `SET` fails, the key is deleted (best effort) so the next read goes to Postgres instead of the old value. Stock changes never invalidate cached prices. Stock can still be stale in one bounded case: two concurrent writes whose `SET`s reach Redis out of commit order leave the older value for up to 300 s, or until the next write (§10).
+- **Stock is kept out of catalog entries.** It lives in `stock:{id}` counters with a 300 s TTL, the same bound as the cache entries. A miss reads Postgres and backfills with `SET NX`, so a backfill never overwrites a counter written after its read. Every stock write and ingestion batch sets the counter after its commit; if that `SET` fails, the key is deleted (best effort) so the next read goes to Postgres instead of the old value. Stock changes never invalidate cached prices. Stock can still be stale in two bounded cases — concurrent writes whose `SET`s reach Redis out of commit order, and a backfill racing a failed write's delete — both capped at 300 s (§10).
 - **TTL.** Each entry's TTL is `min(300 s, time until the next promotion boundary)`, where a boundary is the next `starts_at` of a scheduled promotion or the next `ends_at` of an active one for that product, its category, or (for list pages) the products in the category. A scheduled promotion therefore takes effect when its entries expire, at its start time, with no scheduler. The 300 s cap is also the self-healing bound for a lost bump.
-- **Coalescing.** On a miss, one reader takes `lock:{key}` (`SET NX PX 2000`) and rebuilds. The others poll for 200 ms, then query Postgres directly without writing the cache.
+- **Coalescing.** On a miss, one reader takes `lock:{key}` (`SET NX PX 2000`) and rebuilds. The others poll for up to 200 ms; a poll checks the entry and the lock together (one `MGET`), so a waiter stops as soon as either an entry appears or the lock is released without one being written (the holder decided not to cache), and builds directly from Postgres instead of finishing out the wait. That keeps a build that legitimately opts out of caching (a version read that failed) from making every concurrent reader of the key pay the full 200 ms.
+- **List pages past the end of the result set.** `page` is capped at `MAX_PAGE = 1000`, but a crawler can still request every page up to the cap. Rather than skip the cache for those (which would make every concurrent request for the same empty page wait out the coalescing poll above), an empty past-the-end page is cached like any other entry, just with a short, fixed TTL (`NOT_FOUND_TTL_SECONDS`, 5 s) instead of the promotion-boundary TTL. Staleness — a page that starts returning items after the entry is cached empty — is bounded by that TTL and, sooner in practice, by the version check: a write that adds a matching product bumps the category/all version and invalidates the entry immediately.
 - **Degradation.** Every Redis failure on the read path is logged and falls through to Postgres. An entry built while a version read failed is served but not cached. Stock falls back to the Postgres column. No read endpoint fails because of Redis.
 
-**Consequences.** One `INCR` invalidates any number of entries, and stale entries are overwritten in place instead of leaving orphans. The cost is one extra lookup per read, up to 200 ms of added latency for readers that wait on a rebuild (they poll Redis for the new entry and query Postgres only if it has not appeared by then), and a stale window of at most 5 minutes if Redis loses a bump. Because `ver:all` moves with every category change, the all-products listing is invalidated by any change anywhere, including every ingestion batch.
+**Consequences.** One `INCR` invalidates any number of entries, and stale entries are overwritten in place instead of leaving orphans. The cost is one extra lookup per read, up to 200 ms of added latency for readers that wait on a rebuild (they poll Redis for the new entry and query Postgres once it either hasn't appeared by then or the lock is released without one being written), and a stale window of at most 5 minutes if Redis loses a bump. Because `ver:all` moves with every category change, the all-products listing is invalidated by any change anywhere, including every ingestion batch.
 
 **Rejected.**
 - *Delete by pattern.* `SCAN` plus `DEL` over 50k+ keys on every promotion write is slow and not atomic: readers repopulate keys while the scan runs.
@@ -78,7 +79,7 @@ Where a simpler and a more rigorous option existed, this project took the simple
 **Flow of `POST /promotions` during load.**
 1. Validate the body (Zod), check that the target exists, insert one row. The check constraints enforce the window and value rules.
 2. After the commit, `INCR ver:category:{id}` and `ver:all`.
-3. The next read of any cached list page for that category sees a version mismatch. One reader per page key rebuilds from Postgres with the new promotion applied; the others wait up to 200 ms and then query Postgres themselves.
+3. The next read of any cached list page for that category sees a version mismatch. One reader per page key rebuilds from Postgres with the new promotion applied; the others wait up to 200 ms — less if the lock is released before then with nothing written — and then query Postgres themselves.
 4. Cached product details are not touched. Each one fails its category-version check on its next read and is rebuilt individually. There is no mass write.
 5. **Product created mid-sale.** `POST /products` inserts the row and bumps the category version, so listings pick the product up. Its first read runs the lateral join, which finds the category promotion. The product is discounted immediately, and no promotion data was written for it.
 6. **Cancellation** is a single conditional `UPDATE ... where cancelled_at is null` (compare-and-set, so it is idempotent under concurrency), followed by the same bump.
@@ -207,23 +208,81 @@ Material items the per-task reviews deferred, plus one found while writing this 
 - **Rejection line numbers are chunk-relative.** A chunk cannot know absolute line numbers without reading every preceding chunk, so `chunk_index` is stored alongside `line_number`.
 - **Category-filtered warm reads take 3 Redis round trips** (slug lookup, entry and version, stock), one more than the spec's target of 2.
 - **Test coverage gaps in pricing math.** No test pins percentage rounding (for example 15% off 19.99), the window edges (`starts_at = now`, `ends_at = now`), or the tie-break between promotions with equal `created_at`. The SQL implements all three, but untested behavior can regress.
-- **Stock counter ordering.** `PATCH /products/:id/stock` (and an ingestion batch) writes Postgres and then `SET`s the counter to the committed value. Two concurrent writes to one product can reach Redis out of commit order, leaving the older value in the counter until the next write or the 300 s TTL. A failed `SET` deletes the key, and a backfill after a miss uses `SET NX`, so neither of those can leave a stale counter behind; only the out-of-order case remains, bounded at 300 s. Fix: guard the `SET` with a per-product version (a Lua compare-and-set on `updated_at` or a write counter), or apply deltas with `INCRBY`.
+- **Stock counter ordering.** `PATCH /products/:id/stock` (and an ingestion batch) writes Postgres and then `SET`s the counter to the committed value. Two concurrent writes to one product can reach Redis out of commit order, leaving the older value in the counter until the next write or the 300 s TTL. The failed-`SET`-deletes-the-key and backfill-uses-`SET NX` rules narrow this but don't close it: one interleaving still leaves a stale counter — a backfill reads the committed value `v1`, then a second write commits `v2` and its `SET` fails and deletes the key, then the backfill's `SET NX v1` (still in flight) lands on the now-empty key. The counter reads `v1` with nothing left to correct it until the next write or the 300 s TTL. Fix: guard the `SET` with a per-product version (a Lua compare-and-set on `updated_at` or a write counter), or apply deltas with `INCRBY`.
 - **The lock is released with an unconditional `DEL`.** If a rebuild outlives the 2 s lock, it can release another reader's lock. The only effect is an extra rebuild.
 - **The SAM template has no `VpcConfig`**, and the API is not part of the template.
 - **The API's S3 client uses static credentials.** The API has one S3 client, the presigner. `apps/api/src/deps.ts` builds it from `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, with a `test` fallback and no session token, instead of the SDK's default provider chain. A deployed API therefore needs long-lived static keys and cannot use an IAM role. Fix: use the default chain outside local development, as `apps/ingest/src/aws.ts` already does.
 
 ## 11. Horizontal scaling: 1 vs 4 replicas behind nginx
 
-**Setup.** Measured on 2026-09-25 with the `lb` Compose profile: N `api-lb` replicas, each limited to 1 CPU (`API_CPUS`) and holding a Postgres pool of 10, behind nginx on `:8080` (round-robin, upstream keepalive). The database held the seed data only (200 products, 4 categories), not the 500k-row ingest from §5. The load came from `pnpm modaco --url http://localhost:8080 load browse --concurrency 100 --duration 20s`: 100 workers in a closed loop, a 5 s unrecorded warm-up, then 20 s recorded. Requests were 70% listings (pages 1 to 5, 20 items each) and 30% product details. The full result documents are in [`docs/load-tests/2026-09-25/`](docs/load-tests/2026-09-25/).
+**Setup.** Measured on 2026-09-25 with the `lb` Compose profile.
+- **Stack.** N `api-lb` replicas behind nginx 1.27.5 on `:8080` (round robin, upstream keepalive). Each replica is limited to 1 CPU (`API_CPUS`) and holds a Postgres pool of 10.
+- **Catalog.** The 500k-row ingest from §5: 8 categories of about 62k products, so every requested page exists.
+- **Host.** An Apple M4 Pro Mac (12 cores, 24 GiB). The replicas, nginx, Postgres and Redis shared one Docker Desktop VM with 6 CPUs. The load client ran on the host, outside the VM.
+- **Cache.** Every entry except the version counters was deleted before each run. Each run rebuilt its entries during an unrecorded warm-up, and none expired inside the recorded window.
 
-| Replicas | Requests | req/s | p50 | p90 | p95 | p99 | Errors |
-|---|---|---|---|---|---|---|---|
-| 1 | 113,833 | 5,691.7 | 3.36 ms | 9.54 ms | 207.23 ms | 219.01 ms | 0 |
-| 4 | 161,247 | 8,062.4 | 1.63 ms | 4.88 ms | 201.47 ms | 206.59 ms | 0 |
+The environment, exact commands, per-run tables, and the `docker stats`, client-CPU and cgroup captures are in [`docs/load-tests/2026-09-25-rerun/`](docs/load-tests/2026-09-25-rerun/summary.md).
 
-- **Throughput rose 1.42×, not 4×.** The replicas, Postgres, Redis, nginx and the load generator all shared one Mac's CPUs through Docker Desktop, so adding replicas moved the bottleneck rather than removing it. We did not profile which component saturated first (`docker stats` was not captured during the runs). This shows that the stack scales out and that the balancer spreads load. It does not show what four separate hosts would do.
-- **nginx spread requests evenly.** The 4-replica run split 40,312 / 40,311 / 40,311 / 40,313 across the four `X-Instance-Id` values, within 2 requests of an exact quarter. With 1 replica, every response came from a single instance.
-- **Median and p90 latency halved** (3.36 to 1.63 ms and 9.54 to 4.88 ms). Product details improved the most: p99 went from 10.54 to 5.15 ms.
-- **The tail is bimodal and did not improve.** About 5% of requests took about 200 ms in both runs, while p90 stayed under 10 ms. Every one of those slow requests is a listing: detail p99 stayed under 11 ms. The step sits right at the 200 ms that a cache reader waits for another reader's rebuild before querying Postgres itself (`waitMs` in `packages/core/src/cache/read-through.ts`, §5). That suggests list-page readers regularly hit the rebuild-wait path even without writes, but we have not checked it. If confirmed, the serve-stale-while-revalidate change in §9 would remove this tail. This is the first thing to investigate before trusting any tail numbers from load tests.
-- **What was also checked end to end.** Against a single API: `browse`, `write-mix` and `flash-sale` ran with no transport errors, and the flash-sale mid-sale check passed. A `write-mix` run interrupted with Ctrl-C printed a partial report, exited 130, and left 0 uncancelled promotions.
-- **Limits of the local setup.** About 9 replicas fit before the per-replica pools exhaust Postgres's default `max_connections` of 100. nginx resolves the replica list at startup, so it has to be restarted after rescaling. Both are in the README; on AWS an ALB and RDS Proxy remove them.
+**Method.**
+- **Closed model.** `load browse --seed 42 --concurrency 100 --warmup 15s --duration 60s`: 100 workers, 70% listings (pages 1 to 5, 20 items each) and 30% product details. Three runs per configuration, interleaved 1, 4, 1, 4, 1, 4.
+- **Open model.** For latency at equal load without coordinated omission: `--rate 4900/s` with the same seed, once per configuration, on a pre-warmed cache. 4,900 req/s is 70% of the median 1-replica closed throughput. The 1-replica run was repeated once (see below).
+- **Captured.** `docker stats` for every container about every 5 s, the client's CPU time, and each replica's cgroup `cpu.stat`.
+
+| Replicas (closed, 100 workers) | req/s, mean ± sd (range) | p50 | p90 | p99 | p99.9 | 5xx / transport errors |
+|---|---|---|---|---|---|---|
+| 1 | 7,016 ± 95 (6,934 to 7,120) | 12.97 ms | 19.61 ms | 37.04 ms | 45.23 ms | 0 / 0 |
+| 4 | 14,134 ± 1,884 (11,963 to 15,321) | 2.64 ms | 25.35 ms | 37.20 ms | 46.37 ms | 0 / 0 |
+
+Percentiles are the means of the three runs; ranges and per-run values are in the summary.
+
+- **Throughput doubled: 2.01× on the means.** The three interleaved pairs gave 1.68×, 2.16× and 2.21×. The low pair is explained under round robin below.
+- **With 1 replica, the bottleneck is the replica's CPU limit.**
+  - The replica was at 100% of its 1-CPU quota in every sample of every run.
+  - Postgres stayed under 1% (the cache was warm), Redis at about 16% of a CPU, nginx at about 34%.
+  - The client used about a third of a host core.
+- **With 4 replicas, no single container saturated.**
+  - In runs 2 and 3 the replicas averaged 77 to 82%, nginx 0.8 CPU, Redis 0.35 CPU, Postgres under 1%. The VM was using about 4.3 of its 6 CPUs, and the client about 0.6 of a core.
+  - A diagnostic run with 200 workers reached 18,957 req/s (+24%), with replicas at about 84% and the VM at about 4.9 CPUs. So 100 workers did not saturate four replicas.
+  - The 2× is a ratio at equal concurrency, not a ratio of capacities. 1 replica with 200 workers was not measured.
+- **Why the gain is 2× and not 4×.**
+  - CPU per request, measured as replica CPU ÷ req/s, rises as each replica's load falls: 143 µs at 7,000 req/s per replica, about 208 µs at 3,800, and 359 µs at 1,225.
+  - Four replicas at about 79% (3.2 CPUs of work) therefore delivered 2.2× the throughput.
+  - We did not measure why a busier Node process spends less CPU per request.
+- **Round robin runs at the pace of the slowest replica.**
+  - In the first 4-replica run, one replica needed about 1.45× the CPU per request of the other three. It was pinned at 100% while they ran at about 69%.
+  - Round robin still sent it exactly a quarter of the requests, so the whole run slowed to its pace: 11,963 req/s, with p90 at 31.6 ms.
+  - It did not recur after the replicas were recreated. The cause was not found.
+  - nginx's `least_conn` would route around such a replica; we did not test it.
+- **nginx spread load evenly.** Every 4-replica run split requests into exact quarters, give or take 3 requests.
+- **The median improved; p99 did not.** The closed-model median fell from 13.0 ms to 2.6 ms, but p99 stayed at 37 ms, and p90 rose from 19.6 ms to 25.4 ms.
+- **At equal load, the difference is in the tail.** Open model at 4,900 req/s:
+
+  | Replicas | p50 | p90 | p99 | p99.9 | Errors | Replica CPU |
+  |---|---|---|---|---|---|---|
+  | 1, run 1 | 2.85 ms | 76.03 ms | 4,759.55 ms | 9,076.74 ms | 125 timeouts | 99% |
+  | 1, run 2 | 1.15 ms | 15.26 ms | 51.97 ms | 558.59 ms | 0 | 100% |
+  | 4 | 0.62 ms | 0.79 ms | 2.46 ms | 11.85 ms | 0 | 44% each |
+
+  - 4,900 req/s is 70% of the 1-replica closed throughput, but it saturates one replica under an open model, where each request costs about 204 µs of CPU.
+  - **1 replica.** It ran at its CPU limit in both runs, throttled by the cgroup in about 60% of scheduling periods. Run 1 stalled several times. When the first stall began, a container from an unrelated project was briefly using 0.4 CPU on the same VM. Run 2 held, with p99 at 52 ms.
+  - **4 replicas.** At 44% each, they held p99 at 2.5 ms and p99.9 at 12 ms.
+- **What this shows.** The stack scales out, the balancer spreads load evenly, and warm-read throughput at 100 workers doubles. One replica cannot serve 4,900 req/s with a stable tail; four can.
+- **What this does not show.** What separate hosts would do:
+  - Everything except the client shared one 6-CPU VM. During some runs that VM also held short-lived test containers from another project (listed in the summary).
+  - There is no network between the tiers.
+  - Postgres was idle throughout, so these runs measure the cached read path (nginx, Node, Redis). They do not measure price computation or the rebuild cost in §5.
+- **An open-model load on a cold cache collapsed and did not recover.** Two attempts at 4,900 req/s against 4 replicas, starting from an empty cache (one of them with a 30 s ramp), both collapsed:
+  - Postgres ran at 5 to 6 CPUs on 40 concurrent listing builds (four pools of 10), with 10,000 requests in flight and nginx out of worker connections. More than 46k requests timed out.
+  - Postgres was still busy 5 minutes after the client stopped, until the replicas were restarted.
+  - On an idle stack, a cold 62k-product page takes about 170 to 220 ms to build (`cold-page-build.txt` in the rerun folder), close to the 200 ms coalescing wait (§4). Under load, 40 concurrent builds on 6 CPUs push each build past 200 ms, so waiting readers fall through and run their own query, which adds more load. This feedback loop is our reading of the CPU and latency captures; build times under load were not instrumented.
+  - The closed-model runs survived the same cold start because they never had more than 100 requests in flight.
+  - The collapse was not reproduced with 1 replica, and no fix was tested.
+- **Also checked end to end.**
+  - Through nginx with 4 replicas, `write-mix --rate 100/s --duration 30s` completed 3,000 requests, including 16 promotion creates, 15 cancels and 448 stock writes, with 0 5xx and 0 transport errors. That result supports the upstream keepalive timeout fix.
+  - Against a single API, `browse`, `write-mix` and `flash-sale` ran with no transport errors, and the flash-sale mid-sale check passed.
+  - A `write-mix` run interrupted with Ctrl-C printed a partial report, exited 130, and left 0 uncancelled promotions.
+- **An earlier run was invalidated.** The first run ([`docs/load-tests/2026-09-25/`](docs/load-tests/2026-09-25/README.md)) used the 200-product seed. 28% of its requests hit pages past the end, and each of those waited out a 200 ms lock-wait bug (since fixed, §4). Its 1.42× ratio and its tail analysis measured that bug, not scaling.
+- **Limits of the local setup.**
+  - About 9 replicas fit before the per-replica pools exhaust Postgres's default `max_connections` of 100.
+  - nginx resolves the replica list at startup, so it has to be restarted after rescaling.
+  - Both are in the README. On AWS, an ALB and RDS Proxy remove them.

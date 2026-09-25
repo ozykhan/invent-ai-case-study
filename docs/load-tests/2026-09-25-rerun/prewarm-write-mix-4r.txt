@@ -1,0 +1,16 @@
+2026-09-25T16:50:43Z prewarm: load browse --seed 42 --concurrency 100 --duration 25s --warmup 0s
+sampled 2000 product ids across 8 categories (catalog total 499479)
+phase main: 25s
+browse -> http://localhost:8080  model=closed concurrency=100 durationMs=25000 warmupMs=0 connections=100 timeoutMs=10000 seed=42 maxPage=5 maxErrorRate=0
+
+phase main (25.02s), latency in ms
+  label   count   req/s   p50   p90    p95    p99    p99.9    max      errors  dropped  status
+  total   167603  6698.9  5.21  27.78  34.08  60.7   2646.02  7374.96  0       0        200:167603
+  detail  50056   2000.7  4.66  24.56  30.1   73.73  2228.22  3899.21  0       0        200:50056
+  list    117547  4698.3  5.43  29.62  34.78  54.46  2758.66  7374.96  0       0        200:117547
+
+instances (4)
+  51b5a84e472a  41904  25.0%
+  5f9f91816f60  41900  25.0%
+  70bc6e3534dc  41899  25.0%
+  956f6c22c563  41900  25.0%

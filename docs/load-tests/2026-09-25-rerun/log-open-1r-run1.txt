@@ -1,0 +1,48 @@
+2026-09-25T16:45:58Z # cmd: node --import tsx apps/cli/src/main.ts --url http://localhost:8080 load browse --seed 42 --rate 4900/s --duration 60s --warmup 15s --out docs/load-tests/2026-09-25-rerun/open-1r.json
+2026-09-25T16:45:58Z sampled 2000 product ids across 8 categories (catalog total 499479)
+2026-09-25T16:45:58Z warmup 15s (not recorded)
+2026-09-25T16:46:13Z phase main: 60s
+2026-09-25T16:46:18Z [main 5.0s] 4876 req/s  p50 1.59ms  p99 133.25ms  errors 0  dropped 0  in-flight 119
+2026-09-25T16:46:23Z [main 10.1s] 3983 req/s  p50 10.61ms  p99 624.13ms  errors 0  dropped 0  in-flight 4632
+2026-09-25T16:46:28Z [main 15.1s] 5193 req/s  p50 79.68ms  p99 5136.38ms  errors 0  dropped 0  in-flight 3298
+2026-09-25T16:46:33Z [main 20.1s] 5534 req/s  p50 2.81ms  p99 9076.74ms  errors 125  dropped 0  in-flight 2
+2026-09-25T16:46:38Z [main 25.1s] 4765 req/s  p50 3.36ms  p99 90.11ms  errors 0  dropped 0  in-flight 679
+2026-09-25T16:46:43Z [main 30.1s] 5035 req/s  p50 1.36ms  p99 721.41ms  errors 0  dropped 0  in-flight 3
+2026-09-25T16:46:48Z [main 35.1s] 4867 req/s  p50 2.73ms  p99 34.14ms  errors 0  dropped 0  in-flight 170
+2026-09-25T16:46:53Z [main 40.1s] 4930 req/s  p50 2.57ms  p99 42.37ms  errors 0  dropped 0  in-flight 21
+2026-09-25T16:46:58Z [main 45.1s] 4903 req/s  p50 1.88ms  p99 191.62ms  errors 0  dropped 0  in-flight 4
+2026-09-25T16:47:03Z [main 50.1s] 4900 req/s  p50 0.91ms  p99 73.66ms  errors 0  dropped 0  in-flight 3
+2026-09-25T16:47:08Z [main 55.1s] 4832 req/s  p50 5.16ms  p99 2641.92ms  errors 0  dropped 0  in-flight 344
+2026-09-25T16:47:14Z        75.52 real        15.51 user        12.67 sys
+2026-09-25T16:47:14Z            349487104  maximum resident set size
+2026-09-25T16:47:14Z                    0  average shared memory size
+2026-09-25T16:47:14Z                    0  average unshared data size
+2026-09-25T16:47:14Z                    0  average unshared stack size
+2026-09-25T16:47:14Z                29911  page reclaims
+2026-09-25T16:47:14Z                   15  page faults
+2026-09-25T16:47:14Z                    0  swaps
+2026-09-25T16:47:14Z                    0  block input operations
+2026-09-25T16:47:14Z                    0  block output operations
+2026-09-25T16:47:14Z               419971  messages sent
+2026-09-25T16:47:14Z               424267  messages received
+2026-09-25T16:47:14Z                    0  signals received
+2026-09-25T16:47:14Z                17457  voluntary context switches
+2026-09-25T16:47:14Z              3896744  involuntary context switches
+2026-09-25T16:47:14Z         162386193340  instructions retired
+2026-09-25T16:47:14Z         104588680330  cycles elapsed
+2026-09-25T16:47:14Z            382111480  peak memory footprint
+browse -> http://localhost:8080  model=open rate=4900 rampMs=0 maxInflight=10000 durationMs=60000 warmupMs=15000 connections=10000 timeoutMs=10000 seed=42 maxPage=5 maxErrorRate=0
+
+phase main (60s), latency in ms
+  label   count   req/s   p50   p90    p95     p99      p99.9    max      errors  dropped  status
+  total   293876  4897.9  2.85  76.03  365.06  4759.55  9076.74  9764.69  125     0        200:293876
+  detail  88264   1471.1  2.46  69.38  360.96  4829.18  9076.74  9762.14  36      0        200:88264
+  list    205612  3426.9  3.02  78.34  366.08  4722.69  9068.54  9764.69  89      0        200:205612
+  errors: timeout:125
+
+instances (1)
+  5f9f91816f60  293876  100.0%
+
+checks
+  FAIL error rate: 0.04% (125 of 294001) > --max-error-rate 0.00%
+2026-09-25T16:47:15Z # exit 1

@@ -1,0 +1,48 @@
+2026-09-25T16:24:22Z # cmd: node --import tsx apps/cli/src/main.ts --url http://localhost:8080 load browse --seed 42 --concurrency 100 --duration 60s --warmup 15s --out docs/load-tests/2026-09-25-rerun/closed-4r-run2.json
+2026-09-25T16:24:42Z sampled 2000 product ids across 8 categories (catalog total 499479)
+2026-09-25T16:24:42Z warmup 15s (not recorded)
+2026-09-25T16:24:57Z phase main: 60s
+2026-09-25T16:25:02Z [main 5.0s] 12164 req/s  p50 1.83ms  p99 42.53ms  errors 0  dropped 0  in-flight 100
+2026-09-25T16:25:07Z [main 10.0s] 17239 req/s  p50 3.75ms  p99 34.59ms  errors 0  dropped 0  in-flight 100
+2026-09-25T16:25:12Z [main 15.0s] 16262 req/s  p50 4.05ms  p99 35.07ms  errors 0  dropped 0  in-flight 100
+2026-09-25T16:25:17Z [main 20.0s] 13510 req/s  p50 1.94ms  p99 37.76ms  errors 0  dropped 0  in-flight 100
+2026-09-25T16:25:22Z [main 25.0s] 15291 req/s  p50 3.32ms  p99 36.8ms  errors 0  dropped 0  in-flight 100
+2026-09-25T16:25:27Z [main 30.0s] 14308 req/s  p50 2.66ms  p99 37.38ms  errors 0  dropped 0  in-flight 100
+2026-09-25T16:25:32Z [main 35.0s] 15997 req/s  p50 3.42ms  p99 35.3ms  errors 0  dropped 0  in-flight 100
+2026-09-25T16:25:37Z [main 40.0s] 16318 req/s  p50 3.55ms  p99 36.42ms  errors 0  dropped 0  in-flight 100
+2026-09-25T16:25:42Z [main 45.0s] 16497 req/s  p50 4.02ms  p99 35.78ms  errors 0  dropped 0  in-flight 100
+2026-09-25T16:25:47Z [main 50.0s] 15980 req/s  p50 3.63ms  p99 35.49ms  errors 0  dropped 0  in-flight 100
+2026-09-25T16:25:52Z [main 55.0s] 14523 req/s  p50 3.49ms  p99 37.66ms  errors 0  dropped 0  in-flight 100
+2026-09-25T16:25:57Z [main 60.0s] 13378 req/s  p50 2.15ms  p99 37.34ms  errors 0  dropped 0  in-flight 100
+2026-09-25T16:25:57Z        94.43 real        26.61 user        12.71 sys
+2026-09-25T16:25:57Z            153419776  maximum resident set size
+2026-09-25T16:25:57Z                    0  average shared memory size
+2026-09-25T16:25:57Z                    0  average unshared data size
+2026-09-25T16:25:57Z                    0  average unshared stack size
+2026-09-25T16:25:57Z                11400  page reclaims
+2026-09-25T16:25:57Z                  136  page faults
+2026-09-25T16:25:57Z                    0  swaps
+2026-09-25T16:25:57Z                    0  block input operations
+2026-09-25T16:25:57Z                    0  block output operations
+2026-09-25T16:25:57Z               982108  messages sent
+2026-09-25T16:25:57Z              1016744  messages received
+2026-09-25T16:25:57Z                    0  signals received
+2026-09-25T16:25:57Z                  201  voluntary context switches
+2026-09-25T16:25:57Z              1200887  involuntary context switches
+2026-09-25T16:25:57Z         234743127426  instructions retired
+2026-09-25T16:25:57Z         141716308207  cycles elapsed
+2026-09-25T16:25:57Z            123549376  peak memory footprint
+browse -> http://localhost:8080  model=closed concurrency=100 durationMs=60000 warmupMs=15000 connections=100 timeoutMs=10000 seed=42 maxPage=5 maxErrorRate=0
+
+phase main (60.01s), latency in ms
+  label   count   req/s    p50   p90    p95    p99    p99.9  max     errors  dropped  status
+  total   907435  15120.4  3.39  22.38  31.38  36.96  44.93  231.69  0       0        200:907435
+  detail  272678  4543.6   2.9   19.46  26.08  31.12  38.43  200.78  0       0        200:272678
+  list    634757  10576.8  3.63  26.14  32.86  37.79  46.27  231.69  0       0        200:634757
+
+instances (4)
+  3487c2c9f76b  226857  25.0%
+  4e4172194653  226859  25.0%
+  535a7f5ed1b7  226859  25.0%
+  5f9f91816f60  226860  25.0%
+2026-09-25T16:26:00Z # exit 0

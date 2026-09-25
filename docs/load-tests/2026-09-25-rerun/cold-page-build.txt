@@ -1,0 +1,26 @@
+# Cold vs warm listing build time: single sequential curl requests, no other load.
+# 2026-09-25T18:06:31Z, git eb5a90e. accessories = category id 7, 62,428 products, 0 active promotions.
+# Before each cold request its cache key is deleted (redis-cli del list:7:<asc|desc>:<page>:20); the same request is then repeated warm.
+# Two paths, each started only for this capture and stopped afterwards:
+#   dev-api: pnpm dev:api on the host (no CPU limit), http://localhost:3000
+#   lb-1r:   one api-lb replica (API_CPUS=1) behind nginx, http://localhost:8080 (the path used in the load runs)
+dev-api sort=effective_price page=1 cold 0.216587s warm 0.001553s
+dev-api sort=effective_price page=2 cold 0.169113s warm 0.001899s
+dev-api sort=effective_price page=3 cold 0.174882s warm 0.001976s
+dev-api sort=effective_price page=4 cold 0.171441s warm 0.001852s
+dev-api sort=effective_price page=5 cold 0.177909s warm 0.001944s
+dev-api sort=-effective_price page=1 cold 0.177656s warm 0.001876s
+dev-api sort=-effective_price page=2 cold 0.177743s warm 0.001828s
+dev-api sort=-effective_price page=3 cold 0.174922s warm 0.001725s
+dev-api sort=-effective_price page=4 cold 0.179067s warm 0.001947s
+dev-api sort=-effective_price page=5 cold 0.173608s warm 0.001938s
+lb-1r sort=effective_price page=1 cold 0.220910s warm 0.002429s
+lb-1r sort=effective_price page=2 cold 0.178874s warm 0.002398s
+lb-1r sort=effective_price page=3 cold 0.174978s warm 0.002546s
+lb-1r sort=effective_price page=4 cold 0.168305s warm 0.002460s
+lb-1r sort=effective_price page=5 cold 0.178780s warm 0.002168s
+lb-1r sort=-effective_price page=1 cold 0.170982s warm 0.002074s
+lb-1r sort=-effective_price page=2 cold 0.179475s warm 0.002178s
+lb-1r sort=-effective_price page=3 cold 0.177943s warm 0.002191s
+lb-1r sort=-effective_price page=4 cold 0.181065s warm 0.002077s
+lb-1r sort=-effective_price page=5 cold 0.170907s warm 0.002202s

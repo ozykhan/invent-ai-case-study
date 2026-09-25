@@ -170,7 +170,7 @@ export async function runPhase(transport: Transport, source: LoadSource, rng: Rn
   }
 
   const interrupted = aborted();
-  const stoppedAt = interrupted ? (abortedAt ?? performance.now()) : Math.min(performance.now(), deadline);
+  let stoppedAt = interrupted ? (abortedAt ?? performance.now()) : Math.min(performance.now(), deadline);
   const drain = Promise.allSettled([...inflight]);
   if (interrupted) {
     let grace: NodeJS.Timeout | undefined;
@@ -178,6 +178,13 @@ export async function runPhase(transport: Transport, source: LoadSource, rng: Rn
     clearTimeout(grace);
   } else {
     await drain;
+    // Closed model: every worker was blocked on its own in-flight request when the deadline passed, so that drain
+    // tail is a real part of the phase's span, and measuring elapsedSeconds through it (not just up to the nominal
+    // deadline) keeps rps = count / elapsedSeconds honest instead of overcounting a tail that ran after the phase
+    // nominally ended. Open model: with many more requests in flight, one straggler stalled close to --timeout
+    // would otherwise inflate elapsedSeconds -- and so deflate rps -- for the whole phase; it keeps the simpler
+    // deadline divisor instead.
+    if (opts.model.kind === 'closed') stoppedAt = performance.now();
   }
   return { elapsedSeconds: (stoppedAt - start) / 1000, interrupted };
 }

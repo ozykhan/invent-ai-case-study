@@ -1,0 +1,20 @@
+# after the client exited (16:33:01Z): active Postgres backends and Postgres CPU, polled
+2026-09-25T16:36:03Z active=39 modaco-api-postgres-1 625.22%
+2026-09-25T16:36:12Z active=39 modaco-api-postgres-1 590.74%
+2026-09-25T16:36:21Z active=40 modaco-api-postgres-1 565.91%
+2026-09-25T16:36:30Z active=40 modaco-api-postgres-1 585.73%
+2026-09-25T16:36:40Z active=40 modaco-api-postgres-1 590.88%
+2026-09-25T16:36:50Z active=40 modaco-api-postgres-1 585.74%
+2026-09-25T16:37:00Z active=40 modaco-api-postgres-1 592.06%
+2026-09-25T16:37:10Z active=40 modaco-api-postgres-1 592.97%
+2026-09-25T16:37:20Z active=40 modaco-api-postgres-1 591.06%
+2026-09-25T16:37:30Z active=40 modaco-api-postgres-1 578.10%
+2026-09-25T16:37:40Z active=38 modaco-api-postgres-1 568.46%
+2026-09-25T16:37:50Z active=40 modaco-api-postgres-1 589.33%
+2026-09-25T16:38:08Z still draining; restarting the api-lb replicas to drop their queued queries
+2026-09-25T16:38:09Z active=0 modaco-api-postgres-1 0.01%
+2026-09-25T16:38:16Z active=0 modaco-api-postgres-1 0.00%
+2026-09-25T16:38:22Z active=0 modaco-api-postgres-1 0.00%
+2026-09-25T16:38:28Z active=0 modaco-api-postgres-1 0.00%
+2026-09-25T16:38:35Z active=0 modaco-api-postgres-1 0.00%
+2026-09-25T16:38:41Z active=0 modaco-api-postgres-1 0.02%

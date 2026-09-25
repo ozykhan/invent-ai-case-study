@@ -1,6 +1,7 @@
 import { build, type Histogram } from 'hdr-histogram-js';
 
-export type ErrorKind = 'timeout' | 'ECONNRESET' | 'ECONNREFUSED' | 'other';
+/** `serverError` is any HTTP status >= 500; the rest are transport failures (no HTTP status at all). */
+export type ErrorKind = 'timeout' | 'ECONNRESET' | 'ECONNREFUSED' | 'other' | 'serverError';
 
 const TIMEOUT_CODES = new Set(['UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_CONNECT_TIMEOUT', 'ETIMEDOUT']);
 const RESET_CODES = new Set(['ECONNRESET', 'UND_ERR_SOCKET', 'EPIPE']);
@@ -20,8 +21,10 @@ export function classifyError(err: unknown): ErrorKind {
 export interface LatencySummary { mean: number; p50: number; p90: number; p95: number; p99: number; p999: number; max: number }
 
 export interface StatsSummary {
+  /** Responses recorded into the latency histogram: status < 500 only (see `latencyMs`). */
   count: number;
   rps: number;
+  /** Percentiles over 2xx-4xx responses only; a >= 500 response is counted in `errors.serverError` instead. */
   latencyMs: LatencySummary;
   status: Record<string, number>;
   errors: Partial<Record<ErrorKind, number>>;
@@ -30,20 +33,27 @@ export interface StatsSummary {
 
 export interface IntervalSample { count: number; errors: number; dropped: number; p50Ms: number; p99Ms: number }
 
-const MAX_US = 60_000_000;
-const newHistogram = (): Histogram => build({ lowestDiscernibleValue: 1, highestTrackableValue: MAX_US, numberOfSignificantValueDigits: 3 });
-const clampUs = (us: number): number => Math.min(MAX_US, Math.max(1, Math.round(us)));
+/** Default histogram ceiling: generous for the common case, raised per phase to follow --timeout and --duration. */
+const DEFAULT_MAX_US = 60_000_000;
+const newHistogram = (maxUs: number): Histogram => build({ lowestDiscernibleValue: 1, highestTrackableValue: maxUs, numberOfSignificantValueDigits: 3 });
+const clampUs = (us: number, maxUs: number): number => Math.min(maxUs, Math.max(1, Math.round(us)));
 const toMs = (us: number): number => Math.round(us / 10) / 100;
 
 class LabelStats {
-  private readonly histogram = newHistogram();
+  private readonly histogram: Histogram;
   private readonly status: Record<string, number> = {};
   private readonly errors: Partial<Record<ErrorKind, number>> = {};
   dropped = 0;
 
+  constructor(private readonly maxUs: number) {
+    this.histogram = newHistogram(maxUs);
+  }
+
+  /** A >= 500 status is a server error: counted in `status` and `errors.serverError`, kept out of the histogram. */
   record(latencyUs: number, status: number): void {
-    this.histogram.recordValue(clampUs(latencyUs));
     this.status[status] = (this.status[status] ?? 0) + 1;
+    if (status >= 500) { this.errors.serverError = (this.errors.serverError ?? 0) + 1; return; }
+    this.histogram.recordValue(clampUs(latencyUs, this.maxUs));
   }
 
   recordError(kind: ErrorKind): void {
@@ -68,19 +78,32 @@ class LabelStats {
   }
 }
 
-/** Everything one recorded phase measures. Warmup runs pass `null` instead of a Metrics. */
+/**
+ * Everything one recorded phase measures. Warmup runs pass `null` instead of a Metrics.
+ * `highestTrackableUs` bounds the HDR histogram; pass `timeoutMs`/`durationMs` scaled to µs so a long phase or a
+ * raised --timeout doesn't silently clamp its own tail (default 60 s, the old fixed ceiling).
+ */
 export class Metrics {
-  private readonly total = new LabelStats();
+  private readonly maxUs: number;
+  private readonly total: LabelStats;
   private readonly labels = new Map<string, LabelStats>();
   private readonly instances = new Map<string, number>();
-  private readonly interval = newHistogram();
+  private readonly interval: Histogram;
   private intervalErrors = 0;
   private intervalDropped = 0;
 
+  constructor(highestTrackableUs: number = DEFAULT_MAX_US) {
+    this.maxUs = Math.max(DEFAULT_MAX_US, highestTrackableUs);
+    this.total = new LabelStats(this.maxUs);
+    this.interval = newHistogram(this.maxUs);
+  }
+
+  /** A >= 500 status is a server error: it counts toward `errors` but not the latency histogram (see LabelStats). */
   record(label: string, latencyUs: number, status: number, instance: string | undefined): void {
     this.total.record(latencyUs, status);
     this.label(label).record(latencyUs, status);
-    this.interval.recordValue(clampUs(latencyUs));
+    if (status >= 500) this.intervalErrors++;
+    else this.interval.recordValue(clampUs(latencyUs, this.maxUs));
     const key = instance ?? 'unknown';
     this.instances.set(key, (this.instances.get(key) ?? 0) + 1);
   }
@@ -123,7 +146,7 @@ export class Metrics {
 
   private label(name: string): LabelStats {
     let stats = this.labels.get(name);
-    if (!stats) { stats = new LabelStats(); this.labels.set(name, stats); }
+    if (!stats) { stats = new LabelStats(this.maxUs); this.labels.set(name, stats); }
     return stats;
   }
 }

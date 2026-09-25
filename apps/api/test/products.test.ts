@@ -1,4 +1,4 @@
-import { createRedis, keys, products, promotions, STOCK_TTL_SECONDS } from '@modaco/core';
+import { createRedis, keys, NOT_FOUND_TTL_SECONDS, products, promotions, STOCK_TTL_SECONDS } from '@modaco/core';
 import { desc } from 'drizzle-orm';
 import type { Express } from 'express';
 import request from 'supertest';
@@ -115,11 +115,26 @@ describe('GET /products', () => {
     expect((await request(ctx.app).get('/products?category=nope')).status).toBe(404);
   });
 
-  it('returns an empty page past the total without caching it', async () => {
+  it('caches an empty page past the total with a short TTL', async () => {
     const res = await request(ctx.app).get('/products?page=50');
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ items: [], pagination: { page: 50, pageSize: 20, total: 3 } });
-    expect(await ctx.redis.exists(keys.list(null, 'asc', 50, 20))).toBe(0);
+    const ttl = await ctx.redis.ttl(keys.list(null, 'asc', 50, 20));
+    expect(ttl).toBeGreaterThan(0);
+    expect(ttl).toBeLessThanOrEqual(NOT_FOUND_TTL_SECONDS);
+  });
+
+  it('serves concurrent readers of an empty page-past-total quickly instead of each waiting out the lock', async () => {
+    const start = Date.now();
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () => request(ctx.app).get('/products?page=50')),
+    );
+    const elapsed = Date.now() - start;
+    for (const res of results) {
+      expect(res.status).toBe(200);
+      expect(res.body.items).toEqual([]);
+    }
+    expect(elapsed).toBeLessThan(200);
   });
 
   it('caches a page and rebuilds it after a version bump', async () => {

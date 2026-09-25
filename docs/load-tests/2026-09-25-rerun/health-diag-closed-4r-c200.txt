@@ -1,0 +1,3 @@
+ Container modaco-api-nginx-1 Started 
+health: ok  postgres up  redis up  instance 51b5a84e472a
+distinct instances after 8 health calls: 4 (   1 51b5a84e472a    1 5f9f91816f60    1 70bc6e3534dc    5 956f6c22c563 ) expected 4

@@ -1,0 +1,90 @@
+{
+  "scenario": "browse",
+  "target": "http://localhost:8080",
+  "startedAt": "2026-09-25T16:43:39.468Z",
+  "options": {
+    "model": "open",
+    "rate": 4900,
+    "rampMs": 0,
+    "maxInflight": 10000,
+    "durationMs": 60000,
+    "warmupMs": 15000,
+    "connections": 10000,
+    "timeoutMs": 10000,
+    "seed": 42,
+    "maxPage": 5,
+    "maxErrorRate": 0
+  },
+  "phases": [
+    {
+      "name": "main",
+      "elapsedSeconds": 60,
+      "total": {
+        "count": 294001,
+        "rps": 4900,
+        "latencyMs": {
+          "mean": 0.7,
+          "p50": 0.62,
+          "p90": 0.79,
+          "p95": 0.93,
+          "p99": 2.46,
+          "p999": 11.85,
+          "max": 22.55
+        },
+        "status": {
+          "200": 294001
+        },
+        "errors": {},
+        "dropped": 0
+      },
+      "byLabel": {
+        "detail": {
+          "count": 88300,
+          "rps": 1471.7,
+          "latencyMs": {
+            "mean": 0.59,
+            "p50": 0.51,
+            "p90": 0.65,
+            "p95": 0.77,
+            "p99": 2.11,
+            "p999": 10.89,
+            "max": 21.13
+          },
+          "status": {
+            "200": 88300
+          },
+          "errors": {},
+          "dropped": 0
+        },
+        "list": {
+          "count": 205701,
+          "rps": 3428.4,
+          "latencyMs": {
+            "mean": 0.75,
+            "p50": 0.65,
+            "p90": 0.82,
+            "p95": 0.97,
+            "p99": 2.61,
+            "p999": 12.23,
+            "max": 22.55
+          },
+          "status": {
+            "200": 205701
+          },
+          "errors": {},
+          "dropped": 0
+        }
+      }
+    }
+  ],
+  "instances": {
+    "12b6dcee0155": 73500,
+    "41edcf57b0db": 73500,
+    "5f9f91816f60": 73500,
+    "d0ff825d0ddd": 73501
+  },
+  "checks": [],
+  "notes": {},
+  "interrupted": false,
+  "ok": true
+}

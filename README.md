@@ -127,25 +127,26 @@ pnpm modaco load browse --concurrency 100 --duration 60s           # closed mode
 pnpm modaco load write-mix --rate 500/s --duration 60s             # reads + stock writes + promotion churn
 pnpm modaco load flash-sale --category accessories --concurrency 50 --duration 15s
 pnpm modaco load browse --rate 2000/s --ramp 30s --duration 90s --out tmp/run.json
+pnpm modaco load browse --rate 2000/s --duration 60s --max-error-rate 0.01   # tolerate up to 1% 5xx/transport errors
 ```
 
 - **Scenarios.**
-  - `browse`: category listings with random page and sort, plus product details (`--mix list=70,detail=30`, `--max-page 5` (at most 1000, the API's page limit), `--category`).
+  - `browse`: category listings with random page and sort, plus product details (`--mix list=70,detail=30`, `--max-page 5` (at most 1000, the API's page limit; further clamped down per category to that category's real page count, logged at startup), `--category`).
   - `write-mix`: reads plus stock writes plus promotion create/cancel cycles that bump cache versions (`--mix list=60,detail=25,stock=14,promo=1`).
-  - `flash-sale`: the `demo:flash-sale` flow on the load engine. It records a `before` and an `after` phase and checks that a product created mid-sale reads back at half price; the run exits 1 if that check fails.
-- **Models.** `--rate` holds a constant arrival rate and times each request from its scheduled start, so a stalling server is charged for the requests it delayed (no coordinated omission). Requests over `--max-inflight` (default 10000) are counted as `dropped`. `--concurrency` runs fixed workers, which is useful for finding saturation throughput.
-- **Output.** Per label and in total: count, req/s, p50/p90/p95/p99/p99.9/max in ms, status codes, transport errors (timeout, ECONNRESET, ECONNREFUSED) and drops. Also the share of responses served by each `X-Instance-Id`. `--json` or `--out` gives the full result document for comparing runs.
+  - `flash-sale`: the `demo:flash-sale` flow on the load engine. It records a `before` and an `after` phase and checks that a mid-sale product reads back at half price *and* that the category listing itself reflects the discount (page 1, default sort, read once right after the promotion is created); the run exits 1 if either check fails. The mid-sale product is created fresh every run (`MIDSALE-LOAD-<timestamp>`), deliberately: the check is that a *new* row reads back correctly on its first read, not that an existing cache entry gets invalidated (the listing check above already covers that). Each run leaves one row behind; clean them up with `delete from products where sku like 'MIDSALE-LOAD-%'`.
+- **Models.** `--rate` holds a constant arrival rate and times each request from its scheduled start, so a stalling server is charged for the requests it delayed (no coordinated omission). Requests over `--max-inflight` (default 10000) are counted as `dropped`. `--ramp` runs as its own unrecorded phase before the first recorded phase, so its rising rate never lands in that phase's percentiles. `--concurrency` runs fixed workers, which is useful for finding saturation throughput. The open model's connection pool defaults to `--rate` × `--timeout` (in seconds), floored at 256 and capped at `--max-inflight`, unless `--connections` is set.
+- **Output.** Per label and in total: count, req/s, p50/p90/p95/p99/p99.9/max in ms, status codes, errors and drops. `count`, `req/s` and the percentiles cover 2xx-4xx responses only; a >= 500 response is kept out of the latency histogram and the req/s count and instead counted under `errors.serverError`, alongside the transport error kinds (timeout, ECONNRESET, ECONNREFUSED). `--max-error-rate` (default 0) fails the run (`"ok": false`, exit 1) when the 5xx + transport error rate exceeds it; 4xx is visible in `status` but never counted as an error or fails the run by itself (write-mix legitimately gets some 404/409/422 from promo cancel races). Also the share of responses served by each `X-Instance-Id`. `--json` or `--out` gives the full result document for comparing runs.
 - **Repeatability.** `--seed` makes the request sequence repeatable for `browse` and `flash-sale`. In `write-mix` the reads and stock writes follow the seed, but whether a promo slot creates or cancels depends on which earlier creates have answered, so that part varies with response timing. Setup samples up to 20 listing pages to find product ids and categories, so the catalog must not be empty.
 
 ### Several API replicas behind nginx
 
 ```bash
 docker compose up -d postgres redis localstack && pnpm db:migrate && pnpm seed   # if not done already
-docker compose --profile lb up --build -d --scale api-lb=4                       # 4 replicas + nginx on :8080
+docker compose --profile lb up --build -d --no-deps --scale api-lb=4 api-lb nginx   # 4 replicas + nginx on :8080
 pnpm modaco --url http://localhost:8080 health --watch 1s                        # instance id rotates
 pnpm modaco --url http://localhost:8080 load browse --concurrency 100 --duration 20s --out tmp/lb-4.json
 
-docker compose --profile lb up -d --scale api-lb=1 && docker compose restart nginx   # nginx resolves replicas at startup
+docker compose --profile lb up -d --no-deps --scale api-lb=1 api-lb nginx && docker compose restart nginx   # nginx resolves replicas at startup
 pnpm modaco --url http://localhost:8080 load browse --concurrency 100 --duration 20s --out tmp/lb-1.json
 ```
 
@@ -156,7 +157,7 @@ These use the closed model because it measures how much throughput each configur
 - Each replica holds a Postgres pool of 10 and Postgres allows 100 connections by default, so up to about 9 replicas fit. More need `max_connections` raised or a pooler (PgBouncer; RDS Proxy on AWS).
 - Postgres, Redis, nginx, the replicas and the load generator share this machine's CPUs. Local runs compare configurations (1 vs N replicas); they do not predict production capacity.
 - Stop the replicas with `docker compose --profile lb stop api-lb nginx`.
-- Measured on a Mac (Docker Desktop, shared host CPUs), `load browse --concurrency 100 --duration 20s`: 1 replica 5691.7 req/s (p99 219.0ms) vs 4 replicas 8062.4 req/s (p99 206.6ms), each replica serving ~25% of requests. Analysis in [ADR.md §11](ADR.md#11-horizontal-scaling-1-vs-4-replicas-behind-nginx); raw result documents in [`docs/load-tests/2026-09-25/`](docs/load-tests/2026-09-25/).
+- Measured on an M4 Pro Mac (one 6-CPU Docker Desktop VM shared by all containers) with the 500k-product catalog, three interleaved `load browse --concurrency 100 --duration 60s` runs each. 1 replica: 7,016 ± 95 req/s, p99 37.0 ms. 4 replicas: 14,134 ± 1,884 req/s (2.0×), p99 37.2 ms, requests split exactly 25% per replica. At a fixed 4,900 req/s, p99 was 52 ms to 4.8 s with 1 replica (pinned at its CPU limit) and 2.5 ms with 4. Analysis in [ADR.md §11](ADR.md#11-horizontal-scaling-1-vs-4-replicas-behind-nginx); method and raw results in [`docs/load-tests/2026-09-25-rerun/`](docs/load-tests/2026-09-25-rerun/summary.md).
 
 ## Tests
 

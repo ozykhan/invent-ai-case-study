@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { UsageError } from '../src/errors';
-import { parseDuration, parseIntStrict, parseMix, parseRate } from '../src/load/parse';
+import { parseDuration, parseErrorRate, parseIntStrict, parseMix, parseRate } from '../src/load/parse';
 
 describe('parseDuration', () => {
   it('converts units to milliseconds', () => {
@@ -36,6 +36,17 @@ describe('parseMix', () => {
     expect(() => parseMix('search=5', allowed)).toThrow(/unknown mix label 'search'/);
     expect(() => parseMix('list:70', allowed)).toThrow(UsageError);
     expect(() => parseMix('list=0,detail=0', allowed)).toThrow(/must not all be zero/);
+  });
+});
+
+describe('parseErrorRate', () => {
+  it('accepts a fraction between 0 and 1', () => {
+    expect(parseErrorRate('0')).toBe(0);
+    expect(parseErrorRate('0.02')).toBe(0.02);
+    expect(parseErrorRate('1')).toBe(1);
+  });
+  it('rejects out-of-range and malformed input', () => {
+    for (const bad of ['-0.1', '1.1', 'fast', '']) expect(() => parseErrorRate(bad)).toThrow(UsageError);
   });
 });
 

@@ -1,0 +1,6 @@
+ Container modaco-api-api-lb-4 Removed 
+ Container modaco-api-api-lb-3 Removed 
+ Container modaco-api-api-lb-2 Removed 
+ Container modaco-api-nginx-1 Started 
+health: ok  postgres up  redis up  instance 5f9f91816f60
+distinct instances after 8 health calls: 1 (   8 5f9f91816f60 ) expected 1

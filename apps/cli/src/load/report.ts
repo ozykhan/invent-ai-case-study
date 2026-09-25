@@ -27,8 +27,25 @@ export function formatProgress(phase: string, s: ProgressSample): string {
 }
 
 const HEADER = ['label', 'count', 'req/s', 'p50', 'p90', 'p95', 'p99', 'p99.9', 'max', 'errors', 'dropped', 'status'];
+/** 5xx (`errors.serverError`) and transport errors together; 4xx is visible only in `status`, not counted here. */
 const errorCount = (s: StatsSummary) => Object.values(s.errors).reduce((sum, n) => sum + (n ?? 0), 0);
 const pairs = (o: Record<string, unknown>) => Object.entries(o).map(([k, v]) => `${k}:${String(v)}`).join(' ');
+
+/**
+ * 5xx + transport errors against 2xx-4xx responses plus those errors, summed over every recorded phase. Drops are
+ * excluded: they never reached the target. A run with no recorded responses at all (e.g. interrupted before any
+ * phase) has no rate to report.
+ */
+export function errorRate(phases: PhaseResult[]): { errors: number; total: number; rate: number } {
+  let errors = 0;
+  let total = 0;
+  for (const p of phases) {
+    const e = errorCount(p.total);
+    errors += e;
+    total += p.total.count + e;
+  }
+  return { errors, total, rate: total > 0 ? errors / total : 0 };
+}
 const statsRow = (label: string, s: StatsSummary) => [
   label, s.count, s.rps, s.latencyMs.p50, s.latencyMs.p90, s.latencyMs.p95, s.latencyMs.p99, s.latencyMs.p999, s.latencyMs.max,
   errorCount(s), s.dropped, pairs(s.status) || '-',
