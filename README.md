@@ -142,11 +142,11 @@ pnpm modaco load browse --rate 2000/s --duration 60s --max-error-rate 0.01   # t
 
 ```bash
 docker compose up -d postgres redis localstack && pnpm db:migrate && pnpm seed   # if not done already
-docker compose --profile lb up --build -d --scale api-lb=4                       # 4 replicas + nginx on :8080
+docker compose --profile lb up --build -d --no-deps --scale api-lb=4 api-lb nginx   # 4 replicas + nginx on :8080
 pnpm modaco --url http://localhost:8080 health --watch 1s                        # instance id rotates
 pnpm modaco --url http://localhost:8080 load browse --concurrency 100 --duration 20s --out tmp/lb-4.json
 
-docker compose --profile lb up -d --scale api-lb=1 && docker compose restart nginx   # nginx resolves replicas at startup
+docker compose --profile lb up -d --no-deps --scale api-lb=1 api-lb nginx && docker compose restart nginx   # nginx resolves replicas at startup
 pnpm modaco --url http://localhost:8080 load browse --concurrency 100 --duration 20s --out tmp/lb-1.json
 ```
 
