@@ -6,7 +6,7 @@
   "engines": { "node": ">=22" },
   "scripts": {
     "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r test",
+    "test": "pnpm -r --workspace-concurrency=1 test",
     "test:unit": "pnpm --filter @modaco/core test",
     "db:generate": "pnpm --filter @modaco/core db:generate",
     "db:migrate": "pnpm --filter @modaco/core db:migrate",
