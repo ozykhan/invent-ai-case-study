@@ -1,3 +1,4 @@
+import { DeleteMessageCommand, ReceiveMessageCommand } from '@aws-sdk/client-sqs';
 import { count, eq } from 'drizzle-orm';
 import { ingestionChunks, ingestionJobs, keys, products } from '@modaco/core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -80,11 +81,22 @@ describe('ingestion end to end', () => {
     await untilJob(jobId, (j) => j.status === 'processing', driveS3Events);
     // Simulate the object disappearing so every attempt fails.
     await ctx.deps.db.update(ingestionJobs).set({ s3Key: `uploads/${jobId}/gone.csv` }).where(eq(ingestionJobs.id, jobId));
-    const r = await driveChunks();
-    expect(r.failed).toBe(1);
+
+    // Receive the chunk message directly instead of through driveChunks/pollOnce: pollOnce only deletes a
+    // message after its handler resolves (correct production semantics — a failed delivery must stay
+    // in-flight for a real redelivery/DLQ redrive), but this message is deliberately made to fail, and the
+    // queue's visibility timeout is 360s. Left to pollOnce, it would strand the message in flight on the
+    // shared queue for the rest of the test run. Delete it ourselves once the failure is asserted.
+    const received = await ctx.deps.sqs.send(new ReceiveMessageCommand({ QueueUrl: ctx.deps.config.chunkQueueUrl, MaxNumberOfMessages: 1, WaitTimeSeconds: 5 }));
+    const message = received.Messages?.[0];
+    expect(message).toBeDefined();
+    const chunkMsg = chunkMessageSchema.parse(JSON.parse(message!.Body!));
+    await expect(processChunk(ctx.deps, chunkMsg)).rejects.toThrow();
+
     // Three failed receives would route the message to the DLQ; call the handler directly since the visibility timeout is 360s.
-    const [chunk] = await ctx.deps.db.select().from(ingestionChunks).where(eq(ingestionChunks.jobId, jobId));
-    await handleDeadLetter(ctx.deps, { jobId, chunkIndex: chunk!.chunkIndex, byteStart: chunk!.byteStart, byteEnd: chunk!.byteEnd }, 'exceeded max receive count');
+    await handleDeadLetter(ctx.deps, chunkMsg, 'exceeded max receive count');
+    await ctx.deps.sqs.send(new DeleteMessageCommand({ QueueUrl: ctx.deps.config.chunkQueueUrl, ReceiptHandle: message!.ReceiptHandle! }));
+
     const [job] = await ctx.deps.db.select().from(ingestionJobs).where(eq(ingestionJobs.id, jobId));
     expect(job).toMatchObject({ status: 'failed', failedChunks: 1 });
   });
