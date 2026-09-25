@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Product } from '../src/api-types';
+import { discountedPrice } from '../src/money';
 
 /** The id POST /products returns; GET of it reads back with the stub's mid-sale price and the latest promotion. */
 export const MIDSALE_ID = 900001;
@@ -49,14 +50,9 @@ function withActivePromotion(
   if (!promo || promo.cancelledAt) return p;
   const target = promo.target as { categoryId?: number; productId?: number } | undefined;
   if (target?.categoryId !== p.category.id && target?.productId !== p.id) return p;
-  const value = Number(promo.value);
-  const base = Number(p.basePrice);
   const discountType = promo.discountType as 'percentage' | 'fixed';
-  const effectivePrice = discountType === 'percentage'
-    ? (Math.round(base * (1 - value / 100) * 100) / 100).toFixed(2)
-    : Math.max(0, base - value).toFixed(2);
   return {
-    ...p, effectivePrice,
+    ...p, effectivePrice: discountedPrice(p.basePrice, discountType, promo.value as string),
     activePromotion: { id: promo.id as string, name: promo.name as string, discountType, value: promo.value as string },
   };
 }
