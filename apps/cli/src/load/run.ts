@@ -37,9 +37,6 @@ export async function runLoad(client: ApiClient, scenario: Scenario, o: RunOptio
   const checks: Check[] = [];
   const notes: Record<string, string> = {};
   let interrupted = false;
-  // The ramp runs once, as its own unrecorded phase, right before the first recorded phase: its rising rate is not
-  // representative of steady state, so it must not land in that phase's percentiles.
-  let rampPending = o.model.kind === 'open' && o.model.rampMs > 0;
   const flatModel = (): LoadModel => (o.model.kind === 'open' ? { ...o.model, rampMs: 0 } : o.model);
 
   const runner: PhaseRunner = {
@@ -55,13 +52,6 @@ export async function runLoad(client: ApiClient, scenario: Scenario, o: RunOptio
     },
     async phase(name: string, durationMs: number, source: LoadSource = scenario) {
       if (io.signal?.aborted) { interrupted = true; return; }
-      if (rampPending && o.model.kind === 'open') {
-        rampPending = false;
-        io.log(`ramp ${o.model.rampMs / 1000}s to --rate (not recorded)`);
-        const rr = await runPhase(client, source, rng, null, { model: o.model, durationMs: o.model.rampMs, signal: io.signal });
-        if (rr.interrupted) interrupted = true;
-        if (io.signal?.aborted) { interrupted = true; return; }
-      }
       io.log(`phase ${name}: ${durationMs / 1000}s`);
       const metrics = new Metrics(histogramUs({ timeoutMs: o.timeoutMs, durationMs }));
       const r = await runPhase(client, source, rng, metrics, {
@@ -77,6 +67,14 @@ export async function runLoad(client: ApiClient, scenario: Scenario, o: RunOptio
   };
 
   await scenario.setup(client, io.log);
+  // The ramp runs once, unrecorded, before anything else the scenario does (including --warmup): it climbs from 0
+  // to --rate, so running it after warmup would mean throttling back down from a rate warmup had already survived
+  // at, for no benefit. Every later phase (warmup included) runs flat at the full rate.
+  if (o.model.kind === 'open' && o.model.rampMs > 0 && !io.signal?.aborted) {
+    io.log(`ramp ${o.model.rampMs / 1000}s to --rate (not recorded)`);
+    const rr = await runPhase(client, scenario, rng, null, { model: o.model, durationMs: o.model.rampMs, signal: io.signal });
+    if (rr.interrupted) interrupted = true;
+  }
   try {
     if (scenario.run) {
       await scenario.run(runner);
@@ -95,10 +93,11 @@ export async function runLoad(client: ApiClient, scenario: Scenario, o: RunOptio
   const rate = errorRate(phases);
   if (rate.errors > 0) {
     const pct = (n: number) => `${(n * 100).toFixed(2)}%`;
+    const ok = rate.rate <= o.maxErrorRate;
     checks.push({
       name: 'error rate',
-      ok: rate.rate <= o.maxErrorRate,
-      message: `${pct(rate.rate)} (${rate.errors} of ${rate.total}) <= --max-error-rate ${pct(o.maxErrorRate)}`,
+      ok,
+      message: `${pct(rate.rate)} (${rate.errors} of ${rate.total}) ${ok ? '<=' : '>'} --max-error-rate ${pct(o.maxErrorRate)}`,
     });
   }
 

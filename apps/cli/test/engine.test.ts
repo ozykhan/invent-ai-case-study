@@ -113,6 +113,14 @@ describe('runPhase', () => {
     expect(out.elapsedSeconds).toBeGreaterThanOrEqual(0.14);
   });
 
+  it('keeps the deadline divisor in the open model, unlike the closed model, so one straggler cannot deflate rps for everyone', async () => {
+    // Every request takes 300ms; at a 100ms deadline several are still in flight and drain well past it. Unlike the
+    // closed-model case above, elapsedSeconds should stay close to the nominal duration, not balloon to the drain.
+    const out = await runPhase(delayed(300), source, createRng(1), new Metrics(), { model: { kind: 'open', rate: 50, rampMs: 0, maxInflight: 10_000 }, durationMs: 100 });
+    expect(out.interrupted).toBe(false);
+    expect(out.elapsedSeconds).toBeLessThan(0.25);
+  });
+
   it('stops early when the signal aborts', async () => {
     const ac = new AbortController();
     setTimeout(() => ac.abort(), 100);

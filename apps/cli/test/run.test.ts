@@ -35,6 +35,20 @@ describe('runLoad: --ramp', () => {
     expect(logs.some((l) => l.startsWith('phase main'))).toBe(true);
   });
 
+  it('runs the ramp before --warmup, not after: warmup already runs at the full rate, so ramping down to 0 and back up right after it would be wasted time for no benefit', async () => {
+    const logs: string[] = [];
+    await runLoad(
+      client, createScenario('browse', { maxPage: 5, mix: { list: 1 } }),
+      opts({ model: { kind: 'open', rate: 100, rampMs: 100, maxInflight: 10_000 }, warmupMs: 50, durationMs: 200 }),
+      { log: (m) => logs.push(m) },
+    );
+    const rampIdx = logs.findIndex((l) => l.startsWith('ramp '));
+    const warmupIdx = logs.findIndex((l) => l.startsWith('warmup '));
+    expect(rampIdx).toBeGreaterThanOrEqual(0);
+    expect(warmupIdx).toBeGreaterThanOrEqual(0);
+    expect(rampIdx).toBeLessThan(warmupIdx);
+  });
+
   it('does not add a ramp phase for the closed model or when --ramp is 0', async () => {
     const logs: string[] = [];
     await runLoad(client, createScenario('browse', { maxPage: 5, mix: { list: 1 } }), opts({ durationMs: 200 }), { log: (m) => logs.push(m) });
@@ -50,19 +64,23 @@ describe('runLoad: --max-error-rate', () => {
     return spy;
   }
 
-  it('fails the run by default when every response is a 5xx', async () => {
+  it('fails the run by default when every response is a 5xx, and says so with ">" in the message', async () => {
     const doc = await runLoad(withFailingLoadPath(), createScenario('browse', { maxPage: 5, mix: { list: 1 } }), opts(), { log: () => {} });
     expect(doc.ok).toBe(false);
     expect(doc.phases[0]!.total.count).toBe(0);
     expect(doc.phases[0]!.total.errors.serverError).toBeGreaterThan(0);
     const check = doc.checks.find((c) => c.name === 'error rate');
     expect(check).toMatchObject({ ok: false });
+    expect(check!.message).toContain('> --max-error-rate');
+    expect(check!.message).not.toContain('<=');
   });
 
-  it('passes when --max-error-rate covers the observed rate', async () => {
+  it('passes when --max-error-rate covers the observed rate, and says so with "<=" in the message', async () => {
     const doc = await runLoad(withFailingLoadPath(), createScenario('browse', { maxPage: 5, mix: { list: 1 } }), opts({ maxErrorRate: 1 }), { log: () => {} });
     expect(doc.ok).toBe(true);
-    expect(doc.checks.find((c) => c.name === 'error rate')).toMatchObject({ ok: true });
+    const check = doc.checks.find((c) => c.name === 'error rate');
+    expect(check).toMatchObject({ ok: true });
+    expect(check!.message).toContain('<= --max-error-rate');
   });
 
   it('adds no error-rate check when a phase records no responses at all', async () => {
