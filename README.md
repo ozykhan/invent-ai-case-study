@@ -157,7 +157,7 @@ These use the closed model because it measures how much throughput each configur
 - Each replica holds a Postgres pool of 10 and Postgres allows 100 connections by default, so up to about 9 replicas fit. More need `max_connections` raised or a pooler (PgBouncer; RDS Proxy on AWS).
 - Postgres, Redis, nginx, the replicas and the load generator share this machine's CPUs. Local runs compare configurations (1 vs N replicas); they do not predict production capacity.
 - Stop the replicas with `docker compose --profile lb stop api-lb nginx`.
-- Measured on a Mac (Docker Desktop, shared host CPUs), `load browse --concurrency 100 --duration 20s`: 1 replica 5691.7 req/s (p99 219.0ms) vs 4 replicas 8062.4 req/s (p99 206.6ms), each replica serving ~25% of requests. Analysis in [ADR.md §11](ADR.md#11-horizontal-scaling-1-vs-4-replicas-behind-nginx); raw result documents in [`docs/load-tests/2026-09-25/`](docs/load-tests/2026-09-25/).
+- Measured on an M4 Pro Mac (one 6-CPU Docker Desktop VM shared by all containers) with the 500k-product catalog, three interleaved `load browse --concurrency 100 --duration 60s` runs each. 1 replica: 7,016 ± 95 req/s, p99 37.0 ms. 4 replicas: 14,134 ± 1,884 req/s (2.0×), p99 37.2 ms, requests split exactly 25% per replica. At a fixed 4,900 req/s, p99 was 52 ms to 4.8 s with 1 replica (pinned at its CPU limit) and 2.5 ms with 4. Analysis in [ADR.md §11](ADR.md#11-horizontal-scaling-1-vs-4-replicas-behind-nginx); method and raw results in [`docs/load-tests/2026-09-25-rerun/`](docs/load-tests/2026-09-25-rerun/summary.md).
 
 ## Tests
 

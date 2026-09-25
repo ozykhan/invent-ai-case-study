@@ -215,16 +215,74 @@ Material items the per-task reviews deferred, plus one found while writing this 
 
 ## 11. Horizontal scaling: 1 vs 4 replicas behind nginx
 
-**Setup.** Measured on 2026-09-25 with the `lb` Compose profile: N `api-lb` replicas, each limited to 1 CPU (`API_CPUS`) and holding a Postgres pool of 10, behind nginx on `:8080` (round-robin, upstream keepalive). The database held the seed data only (200 products, 4 categories), not the 500k-row ingest from §5. The load came from `pnpm modaco --url http://localhost:8080 load browse --concurrency 100 --duration 20s`: 100 workers in a closed loop, a 5 s unrecorded warm-up, then 20 s recorded. Requests were 70% listings (pages 1 to 5, 20 items each) and 30% product details. The full result documents are in [`docs/load-tests/2026-09-25/`](docs/load-tests/2026-09-25/).
+**Setup.** Measured on 2026-09-25 with the `lb` Compose profile.
+- **Stack.** N `api-lb` replicas behind nginx 1.27.5 on `:8080` (round robin, upstream keepalive). Each replica is limited to 1 CPU (`API_CPUS`) and holds a Postgres pool of 10.
+- **Catalog.** The 500k-row ingest from §5: 8 categories of about 62k products, so every requested page exists.
+- **Host.** An Apple M4 Pro Mac (12 cores, 24 GiB). The replicas, nginx, Postgres and Redis shared one Docker Desktop VM with 6 CPUs. The load client ran on the host, outside the VM.
+- **Cache.** Every entry except the version counters was deleted before each run. Each run rebuilt its entries during an unrecorded warm-up, and none expired inside the recorded window.
 
-| Replicas | Requests | req/s | p50 | p90 | p95 | p99 | Errors |
-|---|---|---|---|---|---|---|---|
-| 1 | 113,833 | 5,691.7 | 3.36 ms | 9.54 ms | 207.23 ms | 219.01 ms | 0 |
-| 4 | 161,247 | 8,062.4 | 1.63 ms | 4.88 ms | 201.47 ms | 206.59 ms | 0 |
+The environment, exact commands, per-run tables, and the `docker stats`, client-CPU and cgroup captures are in [`docs/load-tests/2026-09-25-rerun/`](docs/load-tests/2026-09-25-rerun/summary.md).
 
-- **Throughput rose 1.42×, not 4×.** The replicas, Postgres, Redis, nginx and the load generator all shared one Mac's CPUs through Docker Desktop, so adding replicas moved the bottleneck rather than removing it. We did not profile which component saturated first (`docker stats` was not captured during the runs). This shows that the stack scales out and that the balancer spreads load. It does not show what four separate hosts would do.
-- **nginx spread requests evenly.** The 4-replica run split 40,312 / 40,311 / 40,311 / 40,313 across the four `X-Instance-Id` values, within 2 requests of an exact quarter. With 1 replica, every response came from a single instance.
-- **Median and p90 latency halved** (3.36 to 1.63 ms and 9.54 to 4.88 ms). Product details improved the most: p99 went from 10.54 to 5.15 ms.
-- **The tail is bimodal and did not improve.** About 5% of requests took about 200 ms in both runs, while p90 stayed under 10 ms. Every one of those slow requests is a listing: detail p99 stayed under 11 ms. The step sits right at the 200 ms that a cache reader waits for another reader's rebuild before querying Postgres itself (`waitMs` in `packages/core/src/cache/read-through.ts`, §5). That suggests list-page readers regularly hit the rebuild-wait path even without writes, but we have not checked it. If confirmed, the serve-stale-while-revalidate change in §9 would remove this tail. This is the first thing to investigate before trusting any tail numbers from load tests.
-- **What was also checked end to end.** Against a single API: `browse`, `write-mix` and `flash-sale` ran with no transport errors, and the flash-sale mid-sale check passed. A `write-mix` run interrupted with Ctrl-C printed a partial report, exited 130, and left 0 uncancelled promotions.
-- **Limits of the local setup.** About 9 replicas fit before the per-replica pools exhaust Postgres's default `max_connections` of 100. nginx resolves the replica list at startup, so it has to be restarted after rescaling. Both are in the README; on AWS an ALB and RDS Proxy remove them.
+**Method.**
+- **Closed model.** `load browse --seed 42 --concurrency 100 --warmup 15s --duration 60s`: 100 workers, 70% listings (pages 1 to 5, 20 items each) and 30% product details. Three runs per configuration, interleaved 1, 4, 1, 4, 1, 4.
+- **Open model.** For latency at equal load without coordinated omission: `--rate 4900/s` with the same seed, once per configuration, on a pre-warmed cache. 4,900 req/s is 70% of the median 1-replica closed throughput. The 1-replica run was repeated once (see below).
+- **Captured.** `docker stats` for every container about every 5 s, the client's CPU time, and each replica's cgroup `cpu.stat`.
+
+| Replicas (closed, 100 workers) | req/s, mean ± sd (range) | p50 | p90 | p99 | p99.9 | 5xx / transport errors |
+|---|---|---|---|---|---|---|
+| 1 | 7,016 ± 95 (6,934 to 7,120) | 12.97 ms | 19.61 ms | 37.04 ms | 45.23 ms | 0 / 0 |
+| 4 | 14,134 ± 1,884 (11,963 to 15,321) | 2.64 ms | 25.35 ms | 37.20 ms | 46.37 ms | 0 / 0 |
+
+Percentiles are the means of the three runs; ranges and per-run values are in the summary.
+
+- **Throughput doubled: 2.01× on the means.** The three interleaved pairs gave 1.68×, 2.16× and 2.21×. The low pair is explained under round robin below.
+- **With 1 replica, the bottleneck is the replica's CPU limit.**
+  - The replica was at 100% of its 1-CPU quota in every sample of every run.
+  - Postgres stayed under 1% (the cache was warm), Redis at about 16% of a CPU, nginx at about 34%.
+  - The client used about a third of a host core.
+- **With 4 replicas, no single container saturated.**
+  - In runs 2 and 3 the replicas averaged 77 to 82%, nginx 0.8 CPU, Redis 0.35 CPU, Postgres under 1%. The VM was using about 4.3 of its 6 CPUs, and the client about 0.6 of a core.
+  - A diagnostic run with 200 workers reached 18,957 req/s (+24%), with replicas at about 84% and the VM at about 4.9 CPUs. So 100 workers did not saturate four replicas.
+  - The 2× is a ratio at equal concurrency, not a ratio of capacities. 1 replica with 200 workers was not measured.
+- **Why the gain is 2× and not 4×.**
+  - CPU per request, measured as replica CPU ÷ req/s, rises as each replica's load falls: 143 µs at 7,000 req/s per replica, about 208 µs at 3,800, and 359 µs at 1,225.
+  - Four replicas at about 79% (3.2 CPUs of work) therefore delivered 2.2× the throughput.
+  - We did not measure why a busier Node process spends less CPU per request.
+- **Round robin runs at the pace of the slowest replica.**
+  - In the first 4-replica run, one replica needed about 1.45× the CPU per request of the other three. It was pinned at 100% while they ran at about 69%.
+  - Round robin still sent it exactly a quarter of the requests, so the whole run slowed to its pace: 11,963 req/s, with p90 at 31.6 ms.
+  - It did not recur after the replicas were recreated. The cause was not found.
+  - nginx's `least_conn` would route around such a replica; we did not test it.
+- **nginx spread load evenly.** Every 4-replica run split requests into exact quarters, give or take 3 requests.
+- **The median improved; p99 did not.** The closed-model median fell from 13.0 ms to 2.6 ms, but p99 stayed at 37 ms, and p90 rose from 19.6 ms to 25.4 ms.
+- **At equal load, the difference is in the tail.** Open model at 4,900 req/s:
+
+  | Replicas | p50 | p90 | p99 | p99.9 | Errors | Replica CPU |
+  |---|---|---|---|---|---|---|
+  | 1, run 1 | 2.85 ms | 76.03 ms | 4,759.55 ms | 9,076.74 ms | 125 timeouts | 99% |
+  | 1, run 2 | 1.15 ms | 15.26 ms | 51.97 ms | 558.59 ms | 0 | 100% |
+  | 4 | 0.62 ms | 0.79 ms | 2.46 ms | 11.85 ms | 0 | 44% each |
+
+  - 4,900 req/s is 70% of the 1-replica closed throughput, but it saturates one replica under an open model, where each request costs about 204 µs of CPU.
+  - **1 replica.** It ran at its CPU limit in both runs, throttled by the cgroup in about 60% of scheduling periods. Run 1 stalled several times. When the first stall began, a container from an unrelated project was briefly using 0.4 CPU on the same VM. Run 2 held, with p99 at 52 ms.
+  - **4 replicas.** At 44% each, they held p99 at 2.5 ms and p99.9 at 12 ms.
+- **What this shows.** The stack scales out, the balancer spreads load evenly, and warm-read throughput at 100 workers doubles. One replica cannot serve 4,900 req/s with a stable tail; four can.
+- **What this does not show.** What separate hosts would do:
+  - Everything except the client shared one 6-CPU VM. During some runs that VM also held short-lived test containers from another project (listed in the summary).
+  - There is no network between the tiers.
+  - Postgres was idle throughout, so these runs measure the cached read path (nginx, Node, Redis). They do not measure price computation or the rebuild cost in §5.
+- **An open-model load on a cold cache collapsed and did not recover.** Two attempts at 4,900 req/s against 4 replicas, starting from an empty cache (one of them with a 30 s ramp), both collapsed:
+  - Postgres ran at 5 to 6 CPUs on 40 concurrent listing builds (four pools of 10), with 10,000 requests in flight and nginx out of worker connections. More than 46k requests timed out.
+  - Postgres was still busy 5 minutes after the client stopped, until the replicas were restarted.
+  - A cold 62k-product page takes 220 to 240 ms to build, which is longer than the 200 ms coalescing wait (§4). So every concurrent reader of a cold page runs its own query.
+  - The closed-model runs survived the same cold start because they never had more than 100 requests in flight.
+  - The collapse was not reproduced with 1 replica, and no fix was tested.
+- **Also checked end to end.**
+  - Through nginx with 4 replicas, `write-mix --rate 100/s --duration 30s` completed 3,000 requests, including 16 promotion creates, 15 cancels and 448 stock writes, with 0 5xx and 0 transport errors. That result supports the upstream keepalive timeout fix.
+  - Against a single API, `browse`, `write-mix` and `flash-sale` ran with no transport errors, and the flash-sale mid-sale check passed.
+  - A `write-mix` run interrupted with Ctrl-C printed a partial report, exited 130, and left 0 uncancelled promotions.
+- **An earlier run was invalidated.** The first run ([`docs/load-tests/2026-09-25/`](docs/load-tests/2026-09-25/README.md)) used the 200-product seed. 28% of its requests hit pages past the end, and each of those waited out a 200 ms lock-wait bug (since fixed, §4). Its 1.42× ratio and its tail analysis measured that bug, not scaling.
+- **Limits of the local setup.**
+  - About 9 replicas fit before the per-replica pools exhaust Postgres's default `max_connections` of 100.
+  - nginx resolves the replica list at startup, so it has to be restarted after rescaling.
+  - Both are in the README. On AWS, an ALB and RDS Proxy remove them.
