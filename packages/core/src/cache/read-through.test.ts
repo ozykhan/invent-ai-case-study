@@ -110,6 +110,38 @@ describe('readThrough', () => {
     expect(await redis.get('lock:k')).toBe('newer-holder');
   });
 
+  it('when the holder build fails, one waiter takes the lock over and builds; the rest wait for its entry', async () => {
+    let builds = 0;
+    const build = async () => {
+      const n = ++builds;
+      await new Promise((r) => setTimeout(r, 100));
+      if (n === 1) throw new Error('pool acquire timeout');
+      return { value: 'second', ttlSeconds: 10 };
+    };
+    const results = await Promise.allSettled(Array.from({ length: 11 }, () => readThrough(redis, 'k', build)));
+    expect(builds).toBe(2);
+    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1);
+    const values = results.flatMap((r) => (r.status === 'fulfilled' ? [r.value] : []));
+    expect(values.filter((v) => v.source === 'built')).toHaveLength(1);
+    expect(values.filter((v) => v.source === 'hit')).toHaveLength(9);
+    expect(await redis.get('lock:k')).toBeNull();
+  });
+
+  it('when the holder lock expires mid-build, one waiter takes it over instead of every waiter building', async () => {
+    let builds = 0;
+    const build = async () => {
+      builds++;
+      await new Promise((r) => setTimeout(r, 300));
+      return { value: 'v', ttlSeconds: 10 };
+    };
+    const first = readThrough(redis, 'k', build, { lockMs: 100 }); // this holder's lock expires under it
+    await new Promise((r) => setTimeout(r, 10));
+    const results = await Promise.all([first, ...Array.from({ length: 10 }, () => readThrough(redis, 'k', build))]);
+    expect(builds).toBe(2);
+    expect(results.every((r) => r.value === 'v')).toBe(true);
+    expect(results.filter((r) => r.source === 'hit')).toHaveLength(9);
+  });
+
   it('waiters still build directly when a poll hits a redis error', async () => {
     await redis.set('lock:k', 'someone-else', 'PX', 5000);
     const realMget = redis.mget.bind(redis) as (...args: unknown[]) => Promise<unknown>;

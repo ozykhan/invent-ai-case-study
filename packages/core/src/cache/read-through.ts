@@ -46,6 +46,11 @@ export class CacheWaitTimeoutError extends Error {
 // Compare-and-delete: only the holder whose token is still in the lock may release it. A holder
 // whose lock expired must not delete the lock a newer holder took since.
 const RELEASE_LOCK = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`;
+// Compare-and-set: the holder built with `cache: false`, so there will be no entry to wait for. It
+// swaps its token for this marker, briefly, and waiters that see it build directly.
+const UNCACHED = 'uncached';
+const UNCACHED_MARK_MS = 1000;
+const MARK_UNCACHED = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('set', KEYS[1], ARGV[2], 'PX', ARGV[3]) else return 0 end`;
 
 export interface BuildResult<T> {
   value: T;
@@ -71,8 +76,12 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * Coalescing fails closed. A miss takes the key's lock (a random token, `lockMs` TTL) and builds;
  * every other miss polls, with backoff, until one of:
  * - a fresh entry appears: a hit;
- * - the lock is released without an entry (the holder built with `cache: false`, its SET failed,
- *   or its build threw): the waiter builds directly;
+ * - the holder built with `cache: false` (it leaves an "uncached" marker in the lock): the waiter
+ *   builds directly, since no entry is coming;
+ * - the lock is gone with no entry (the holder's build threw, its SET failed, or its lock
+ *   expired): the waiter tries to take the lock over. One wins and builds as the new holder; the
+ *   rest keep waiting for its entry. Letting them all build is what kept an overloaded cold start
+ *   from recovering: each failed holder released a herd whose queries starved the next holder;
  * - `waitMs` passes: CacheWaitTimeoutError, with no build.
  */
 export async function readThrough<T, E = undefined>(
@@ -99,35 +108,36 @@ export async function readThrough<T, E = undefined>(
   };
 
   // Used while polling as a non-holder: fetches the entry, the lock, and extraKeys together in one
-  // round trip, so a waiter can tell "still building" (lock held, no entry) apart from "the holder
-  // decided not to cache" (lock released, no entry) without a second call.
-  const tryHitAndLock = async (): Promise<{ hit: { value: T; extra?: E } | undefined; lockHeld: boolean }> => {
+  // round trip, so a waiter can tell "still building" (lock held, no entry), "built without
+  // caching" (the uncached marker) and "holder gone" (no lock, no entry) apart without a second call.
+  const tryHitAndLock = async (): Promise<{ hit: { value: T; extra?: E } | undefined; lock: string | null }> => {
     const raw = await redis.mget(key, keys.lock(key), ...extraKeys);
-    const lockHeld = raw[1] !== null && raw[1] !== undefined;
+    const lock = raw[1] ?? null;
     const rawEntry = raw[0];
-    if (rawEntry === null || rawEntry === undefined) return { hit: undefined, lockHeld };
+    if (rawEntry === null || rawEntry === undefined) return { hit: undefined, lock };
     const value = JSON.parse(rawEntry) as T;
     if (opts.isFresh) {
       const result = await opts.isFresh(value, raw.slice(2));
       const check: FreshResult<E> = typeof result === 'boolean' ? { fresh: result } : result;
-      if (!check.fresh) return { hit: undefined, lockHeld };
-      return { hit: { value, extra: check.extra }, lockHeld };
+      if (!check.fresh) return { hit: undefined, lock };
+      return { hit: { value, extra: check.extra }, lock };
     }
-    return { hit: { value }, lockHeld };
+    return { hit: { value }, lock };
   };
 
   const lockKey = keys.lock(key);
+  const tryLock = async (): Promise<string | undefined> => {
+    const token = randomUUID();
+    return (await redis.set(lockKey, token, 'PX', lockMs, 'NX')) === 'OK' ? token : undefined;
+  };
   let lockToken: string | undefined;
   let timedOut = false;
   try {
     const hit = await tryHit();
     if (hit !== undefined) return { value: hit.value, source: 'hit', extra: hit.extra };
 
-    const token = randomUUID();
-    const locked = await redis.set(lockKey, token, 'PX', lockMs, 'NX');
-    if (locked === 'OK') {
-      lockToken = token;
-    } else {
+    lockToken = await tryLock();
+    if (lockToken === undefined) {
       const deadline = Date.now() + waitMs;
       let delay = pollMs;
       for (;;) {
@@ -138,12 +148,16 @@ export async function readThrough<T, E = undefined>(
         }
         await sleep(Math.min(delay, remaining));
         delay = Math.min(maxPollMs, delay * 2);
-        const { hit: late, lockHeld } = await tryHitAndLock();
+        const { hit: late, lock } = await tryHitAndLock();
         if (late !== undefined) return { value: late.value, source: 'hit', extra: late.extra };
-        // The holder released the lock without writing an entry (e.g. it built with `cache:
-        // false`). Waiting out the rest of waitMs would only delay every waiter by the same
-        // amount; build directly instead, same as the no-lock-acquired bypass path below.
-        if (!lockHeld) break;
+        // The holder built with `cache: false`: no entry is coming, and waiting out the rest of
+        // waitMs would only delay every waiter by the same amount. Build directly.
+        if (lock === UNCACHED) break;
+        // The holder is gone without an entry. Take over, so one waiter rebuilds, not all of them.
+        if (lock === null) {
+          lockToken = await tryLock();
+          if (lockToken !== undefined) break;
+        }
       }
     }
   } catch (err) {
@@ -156,13 +170,19 @@ export async function readThrough<T, E = undefined>(
 
   // The lock holder. A build() error is the caller's (e.g. Postgres down), not cache degradation: it
   // propagates as is, and building again would only repeat it. Only the cache write is best effort.
+  let uncached = false;
   try {
     const built = await build();
     if (built.cache !== false) {
       await redis.set(key, JSON.stringify(built.value), 'EX', Math.max(1, built.ttlSeconds)).catch(onError);
+    } else {
+      uncached = true;
     }
     return { value: built.value, source: 'built' };
   } finally {
-    await redis.eval(RELEASE_LOCK, 1, lockKey, lockToken).catch(onError);
+    await (uncached
+      ? redis.eval(MARK_UNCACHED, 1, lockKey, lockToken, UNCACHED, String(UNCACHED_MARK_MS))
+      : redis.eval(RELEASE_LOCK, 1, lockKey, lockToken)
+    ).catch(onError);
   }
 }
