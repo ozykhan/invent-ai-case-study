@@ -38,6 +38,7 @@ const product = (id: number) => {
 export async function startStubApi(opts: { total?: number; degraded?: boolean; midSalePrice?: string } = {}): Promise<StubApi> {
   const total = opts.total ?? 1000;
   const state: StubState = { hits: new Map(), samplePages: 0, openPromotions: new Set() };
+  const promotionsById = new Map<string, Record<string, unknown>>();
   let served = 0;
 
   const server = createServer(async (req, res) => {
@@ -83,11 +84,18 @@ export async function startStubApi(opts: { total?: number; degraded?: boolean; m
         const id = randomUUID();
         state.openPromotions.add(id);
         state.lastPromotionId = id;
-        return send(201, { id, ...body, cancelledAt: null, createdAt: new Date().toISOString() });
+        const promotion = { id, ...body, cancelledAt: null, createdAt: new Date().toISOString() };
+        promotionsById.set(id, promotion);
+        return send(201, promotion);
       }
-      case 'POST /promotions/:uuid/cancel':
+      case 'POST /promotions/:uuid/cancel': {
         state.openPromotions.delete(segment);
-        return send(200, { id: segment, cancelledAt: new Date().toISOString() });
+        // Mirrors the real API, which returns the full promotion view (not just id/cancelledAt) from cancel.
+        const existing = promotionsById.get(segment) ?? { id: segment };
+        const cancelled = { ...existing, cancelledAt: new Date().toISOString() };
+        promotionsById.set(segment, cancelled);
+        return send(200, cancelled);
+      }
       default:
         return send(404, { error: { code: 'not_found', message: 'route not found' } });
     }
