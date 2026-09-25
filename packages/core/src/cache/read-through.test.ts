@@ -50,11 +50,11 @@ describe('readThrough', () => {
       return { value: 'empty', ttlSeconds: 10, cache: false };
     };
     const start = Date.now();
-    const results = await Promise.all(Array.from({ length: 10 }, () => readThrough(redis, 'k', build, { waitMs: 200, pollMs: 20 })));
+    const results = await Promise.all(Array.from({ length: 10 }, () => readThrough(redis, 'k', build, { waitMs: 1000, pollMs: 20 })));
     const elapsed = Date.now() - start;
     expect(results.every((r) => r.value === 'empty')).toBe(true);
     expect(builds).toBe(10); // no coalescing possible: nothing is ever written for the others to hit
-    expect(elapsed).toBeLessThan(120);
+    expect(elapsed).toBeLessThan(500); // well under waitMs (1000ms): waiters stop polling long before the deadline
     expect(await redis.get('k')).toBeNull();
   });
 

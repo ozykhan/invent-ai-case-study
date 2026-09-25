@@ -108,7 +108,7 @@ export async function getCachedProductPage(
     // normal version check above (a write that populates the page bumps the version and invalidates
     // it sooner).
     if (page.items.length === 0 && opts.page > 1) {
-      return { value: { version: version ?? 0, ...page }, ttlSeconds: NOT_FOUND_TTL_SECONDS };
+      return { value: { version: version ?? 0, ...page }, ttlSeconds: NOT_FOUND_TTL_SECONDS, cache: ok };
     }
     const boundary = await nextPromotionBoundary(deps.db, { categoryId: opts.categoryId }, now);
     return { value: { version: version ?? 0, ...page }, ttlSeconds: ttlSeconds(now, boundary), cache: ok };
