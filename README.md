@@ -34,6 +34,18 @@ docker compose exec api pnpm db:migrate
 docker compose exec api pnpm seed
 ```
 
+## Configuration
+
+Everything is read from environment variables; `.env.example` lists them with their local values. Most are connection strings and AWS names. Three tune how the API's Postgres pool behaves under overload (the ingestion worker keeps the driver defaults):
+
+| Variable | Default | Effect |
+|---|---|---|
+| `DB_POOL_ACQUIRE_TIMEOUT_MS` | `2000` | A request that waits longer than this for a pool connection fails with 503 `overloaded` and `Retry-After: 1` instead of queueing without bound. `0` waits forever. |
+| `DB_STATEMENT_TIMEOUT_MS` | `5000` | Postgres `statement_timeout` on every API connection. A cancelled statement (SQLSTATE 57014) is also a 503 `overloaded`. `0` disables it. |
+| `DB_JIT` | `off` | Postgres JIT for the API's connections (`on`/`off`). It added 83 to 131 ms to every cold listing build (ADR §4). |
+
+Keep the worst-case bounded cache build, three sequential queries of at most acquire + statement timeout each (21 s with the defaults), below the 30 s cache lock TTL (ADR §4). If the lock expired under a live build, its waiters would take over and build again.
+
 ## Endpoints
 
 | Method | Path | Purpose |
@@ -136,6 +148,7 @@ pnpm modaco load browse --rate 2000/s --duration 60s --max-error-rate 0.01   # t
   - `flash-sale`: the `demo:flash-sale` flow on the load engine. It records a `before` and an `after` phase and checks that a mid-sale product reads back at half price *and* that the category listing itself reflects the discount (page 1, default sort, read once right after the promotion is created); the run exits 1 if either check fails. The mid-sale product is created fresh every run (`MIDSALE-LOAD-<timestamp>`), deliberately: the check is that a *new* row reads back correctly on its first read, not that an existing cache entry gets invalidated (the listing check above already covers that). Each run leaves one row behind; clean them up with `delete from products where sku like 'MIDSALE-LOAD-%'`.
 - **Models.** `--rate` holds a constant arrival rate and times each request from its scheduled start, so a stalling server is charged for the requests it delayed (no coordinated omission). Requests over `--max-inflight` (default 10000) are counted as `dropped`. `--ramp` runs as its own unrecorded phase before the first recorded phase, so its rising rate never lands in that phase's percentiles. `--concurrency` runs fixed workers, which is useful for finding saturation throughput. The open model's connection pool defaults to `--rate` × `--timeout` (in seconds), floored at 256 and capped at `--max-inflight`, unless `--connections` is set.
 - **Output.** Per label and in total: count, req/s, p50/p90/p95/p99/p99.9/max in ms, status codes, errors and drops. `count`, `req/s` and the percentiles cover 2xx-4xx responses only; a >= 500 response is kept out of the latency histogram and the req/s count and instead counted under `errors.serverError`, alongside the transport error kinds (timeout, ECONNRESET, ECONNREFUSED). `--max-error-rate` (default 0) fails the run (`"ok": false`, exit 1) when the 5xx + transport error rate exceeds it; 4xx is visible in `status` but never counted as an error or fails the run by itself (write-mix legitimately gets some 404/409/422 from promo cancel races). Also the share of responses served by each `X-Instance-Id`. `--json` or `--out` gives the full result document for comparing runs.
+- **Cold cache.** A run against an empty cache starts with a burst of 503 `overloaded` while the listing pages are built (one build per key; waiters give up after 5 s instead of querying Postgres themselves), then settles on cache hits. See ADR §11 for the measured size of that burst.
 - **Repeatability.** `--seed` makes the request sequence repeatable for `browse` and `flash-sale`. In `write-mix` the reads and stock writes follow the seed, but whether a promo slot creates or cancels depends on which earlier creates have answered, so that part varies with response timing. Setup samples up to 20 listing pages to find product ids and categories, so the catalog must not be empty.
 
 ### Several API replicas behind nginx
@@ -157,7 +170,7 @@ These use the closed model because it measures how much throughput each configur
 - Each replica holds a Postgres pool of 10 and Postgres allows 100 connections by default, so up to about 9 replicas fit. More need `max_connections` raised or a pooler (PgBouncer; RDS Proxy on AWS).
 - Postgres, Redis, nginx, the replicas and the load generator share this machine's CPUs. Local runs compare configurations (1 vs N replicas); they do not predict production capacity.
 - Stop the replicas with `docker compose --profile lb stop api-lb nginx`.
-- Measured on an M4 Pro Mac (one 6-CPU Docker Desktop VM shared by all containers) with the 500k-product catalog, three interleaved `load browse --concurrency 100 --duration 60s` runs each. 1 replica: 7,016 ± 95 req/s, p99 37.0 ms. 4 replicas: 14,134 ± 1,884 req/s (2.0×), p99 37.2 ms, requests split exactly 25% per replica. At a fixed 4,900 req/s, p99 was 52 ms to 4.8 s with 1 replica (pinned at its CPU limit) and 2.5 ms with 4. Analysis in [ADR.md §11](ADR.md#11-horizontal-scaling-1-vs-4-replicas-behind-nginx); method and raw results in [`docs/load-tests/2026-09-25-rerun/`](docs/load-tests/2026-09-25-rerun/summary.md).
+- Measured on an M4 Pro Mac (one 6-CPU Docker Desktop VM shared by all containers) with the 500k-product catalog, three interleaved `load browse --concurrency 100 --duration 60s` runs each. 1 replica: 7,016 ± 95 req/s, p99 37.0 ms. 4 replicas: 14,134 ± 1,884 req/s (2.0×), p99 37.2 ms, requests split exactly 25% per replica. At a fixed 4,900 req/s, p99 was 52 ms to 4.8 s with 1 replica (pinned at its CPU limit) and 2.5 ms with 4. Starting from an empty cache at that rate, 4 replicas used to collapse; they now shed 5.4% of requests as 503s in the first 15 to 20 s and then hold the rate. Analysis in [ADR.md §11](ADR.md#11-horizontal-scaling-1-vs-4-replicas-behind-nginx); method and raw results in [`docs/load-tests/2026-09-25-rerun/`](docs/load-tests/2026-09-25-rerun/summary.md).
 
 ## Tests
 
@@ -168,7 +181,7 @@ pnpm typecheck
 ```
 
 - `pnpm test` runs `packages/core`, `apps/api` and `apps/ingest` serially (`--workspace-concurrency=1`) because each truncates the same Postgres database. Tests wipe the tables, so re-run `pnpm seed` afterwards if you want demo data.
-- `pnpm test:unit` runs only `packages/core`. It still needs Postgres and Redis for four of its eleven files (schema, queries, versions, read-through). The pure tests alone (money, pricing, slugs, CSV, chunking, cache keys) run with no infrastructure:
+- `pnpm test:unit` runs only `packages/core`. It still needs Postgres and Redis for five of its twelve files (schema, queries, db client, versions, read-through). The pure tests alone (money, pricing, slugs, CSV, chunking, cache keys) run with no infrastructure:
 
   ```bash
   pnpm --filter @modaco/core exec vitest run src/money.test.ts src/slug.test.ts src/pricing src/ingest src/cache/keys.test.ts src/cache/redis.test.ts
