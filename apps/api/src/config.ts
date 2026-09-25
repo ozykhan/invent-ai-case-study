@@ -12,6 +12,9 @@ const schema = z.object({
   // An empty string (e.g. INSTANCE_ID="" from an unset compose/k8s substitution) is treated the same as unset,
   // rather than failing min(1) validation: it still falls back to the hostname below.
   INSTANCE_ID: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
+  DB_POOL_ACQUIRE_TIMEOUT_MS: z.coerce.number().int().nonnegative().default(2000),
+  DB_STATEMENT_TIMEOUT_MS: z.coerce.number().int().nonnegative().default(5000),
+  DB_JIT: z.enum(['on', 'off', 'true', 'false', '1', '0']).default('off'),
 });
 
 export interface Config {
@@ -24,6 +27,21 @@ export interface Config {
   logLevel: string;
   /** Sent as X-Instance-Id. In Docker the hostname is the container id, unique per replica. */
   instanceId: string;
+  /**
+   * Load shedding. A pool acquire that waits longer than dbPoolAcquireTimeoutMs fails (503) instead
+   * of queueing without bound, and Postgres cancels any statement past dbStatementTimeoutMs (503).
+   * 0 disables either one.
+   *
+   * Invariant: readThrough's lock TTL (30 s) must stay above the worst-case build, or the lock
+   * expires under a live holder and its waiters build too. The longest build is a product detail,
+   * three sequential queries (category lookup, fetch by id, promotion boundary), each bounded by
+   * acquire + statement timeout: 3 x (2 s + 5 s) = 21 s with the defaults. A list page is two
+   * phases (page with count in parallel, then boundary), 14 s. Raise the timeouts only with that in mind.
+   */
+  dbPoolAcquireTimeoutMs: number;
+  dbStatementTimeoutMs: number;
+  /** Postgres JIT for the API's connections. Off: it added 83-131 ms to every cold page build. */
+  dbJit: boolean;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -32,5 +50,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     port: e.PORT, databaseUrl: e.DATABASE_URL, redisUrl: e.REDIS_URL, awsRegion: e.AWS_REGION,
     s3PublicEndpoint: e.S3_PUBLIC_ENDPOINT, s3Bucket: e.S3_BUCKET, logLevel: e.LOG_LEVEL,
     instanceId: e.INSTANCE_ID ?? hostname(),
+    dbPoolAcquireTimeoutMs: e.DB_POOL_ACQUIRE_TIMEOUT_MS, dbStatementTimeoutMs: e.DB_STATEMENT_TIMEOUT_MS,
+    dbJit: ['on', 'true', '1'].includes(e.DB_JIT),
   };
 }

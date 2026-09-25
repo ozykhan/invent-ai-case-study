@@ -15,7 +15,12 @@ export interface AppDeps {
 
 export async function createDeps(config: Config): Promise<AppDeps & { close(): Promise<void> }> {
   const logger = createLogger(config.logLevel);
-  const { db, close: closeDb } = createDb(config.databaseUrl, { max: 10 });
+  const { db, close: closeDb } = createDb(config.databaseUrl, {
+    max: 10,
+    connectionTimeoutMillis: config.dbPoolAcquireTimeoutMs,
+    statementTimeoutMs: config.dbStatementTimeoutMs,
+    jit: config.dbJit,
+  });
   const redis = createRedis(config.redisUrl);
   redis.on('error', (err) => logger.warn({ err }, 'redis error'));
   await redis.connect().catch((err) => logger.warn({ err }, 'redis initial connect failed; continuing degraded'));

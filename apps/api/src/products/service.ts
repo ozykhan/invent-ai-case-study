@@ -11,25 +11,26 @@ export interface ProductItem extends ProductRecord { stock: number }
 export class ProductService {
   constructor(private readonly deps: AppDeps) {}
 
-  async getProduct(id: number): Promise<ProductItem | null> {
-    const cached = await getCachedProduct(this.deps, id);
+  /** `signal` fires when the client disconnects; every database phase checks it first and skips the work. */
+  async getProduct(id: number, signal?: AbortSignal): Promise<ProductItem | null> {
+    const cached = await getCachedProduct(this.deps, id, signal);
     if (!cached) return null;
     // A warm cache hit already carries the live stock counter (fetched in the same round trip as
     // the category-version freshness check); only fall back to a separate lookup when it doesn't.
     if (cached.stock !== undefined) return { ...cached.record, stock: cached.stock };
-    const stocks = await loadStocks(this.deps, [id]);
+    const stocks = await loadStocks(this.deps, [id], signal);
     return { ...cached.record, stock: stocks.get(id) ?? 0 };
   }
 
-  async listProducts(q: ListQuery): Promise<{ items: ProductItem[]; pagination: { page: number; pageSize: number; total: number } }> {
+  async listProducts(q: ListQuery, signal?: AbortSignal): Promise<{ items: ProductItem[]; pagination: { page: number; pageSize: number; total: number } }> {
     let categoryId: number | null = null;
     if (q.category) {
-      categoryId = await resolveCategoryId(this.deps, q.category);
+      categoryId = await resolveCategoryId(this.deps, q.category, signal);
       if (categoryId === null) throw notFound(`category '${q.category}' not found`);
     }
     const sort = q.sort === '-effective_price' ? 'desc' : 'asc';
-    const page = await getCachedProductPage(this.deps, { categoryId, sort, page: q.page, pageSize: q.pageSize });
-    const stocks = await loadStocks(this.deps, page.items.map((i) => i.id));
+    const page = await getCachedProductPage(this.deps, { categoryId, sort, page: q.page, pageSize: q.pageSize }, signal);
+    const stocks = await loadStocks(this.deps, page.items.map((i) => i.id), signal);
     return {
       items: page.items.map((i) => ({ ...i, stock: stocks.get(i.id) ?? 0 })),
       pagination: { page: q.page, pageSize: q.pageSize, total: page.total },
