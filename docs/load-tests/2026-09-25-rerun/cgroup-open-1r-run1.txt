@@ -1,0 +1,2 @@
+cpu.stat before /modaco-api-api-lb-1 5f9f91816f6048cbe40bb92bd4c3f9924adf69a35877830084ab3175a6435ab7: usage_usec 67776044 user_usec 51294967 system_usec 16481076 nice_usec 0 nr_periods 1410 nr_throttled 207 throttled_usec 2007799 nr_bursts 0 burst_usec 0 
+cpu.stat after /modaco-api-api-lb-1 5f9f91816f6048cbe40bb92bd4c3f9924adf69a35877830084ab3175a6435ab7: usage_usec 141894032 user_usec 105425822 system_usec 36468209 nice_usec 0 nr_periods 2165 nr_throttled 681 throttled_usec 6498496 nr_bursts 0 burst_usec 0 

@@ -1,0 +1,145 @@
+{
+  "scenario": "write-mix",
+  "target": "http://localhost:8080",
+  "startedAt": "2026-09-25T16:51:29.088Z",
+  "options": {
+    "model": "open",
+    "rate": 100,
+    "rampMs": 0,
+    "maxInflight": 10000,
+    "durationMs": 30000,
+    "warmupMs": 5000,
+    "connections": 1000,
+    "timeoutMs": 10000,
+    "seed": 42,
+    "maxPage": 5,
+    "maxErrorRate": 0
+  },
+  "phases": [
+    {
+      "name": "main",
+      "elapsedSeconds": 30,
+      "total": {
+        "count": 3000,
+        "rps": 100,
+        "latencyMs": {
+          "mean": 19.38,
+          "p50": 2.58,
+          "p90": 23.04,
+          "p95": 175.62,
+          "p99": 219.78,
+          "p999": 498.43,
+          "max": 679.21
+        },
+        "status": {
+          "200": 2984,
+          "201": 16
+        },
+        "errors": {},
+        "dropped": 0
+      },
+      "byLabel": {
+        "detail": {
+          "count": 755,
+          "rps": 25.2,
+          "latencyMs": {
+            "mean": 5.07,
+            "p50": 3.22,
+            "p90": 6.9,
+            "p95": 16.43,
+            "p99": 60.96,
+            "p999": 104.38,
+            "max": 104.36
+          },
+          "status": {
+            "200": 755
+          },
+          "errors": {},
+          "dropped": 0
+        },
+        "list": {
+          "count": 1766,
+          "rps": 58.9,
+          "latencyMs": {
+            "mean": 29.33,
+            "p50": 1.85,
+            "p90": 173.18,
+            "p95": 186.75,
+            "p99": 268.8,
+            "p999": 553.98,
+            "max": 679.21
+          },
+          "status": {
+            "200": 1766
+          },
+          "errors": {},
+          "dropped": 0
+        },
+        "promo:cancel": {
+          "count": 15,
+          "rps": 0.5,
+          "latencyMs": {
+            "mean": 4.46,
+            "p50": 3.1,
+            "p90": 6.6,
+            "p95": 18.96,
+            "p99": 18.96,
+            "p999": 18.96,
+            "max": 18.95
+          },
+          "status": {
+            "200": 15
+          },
+          "errors": {},
+          "dropped": 0
+        },
+        "promo:create": {
+          "count": 16,
+          "rps": 0.5,
+          "latencyMs": {
+            "mean": 3.9,
+            "p50": 2.98,
+            "p90": 6.06,
+            "p95": 7.59,
+            "p99": 7.59,
+            "p999": 7.59,
+            "max": 7.59
+          },
+          "status": {
+            "201": 16
+          },
+          "errors": {},
+          "dropped": 0
+        },
+        "stock": {
+          "count": 448,
+          "rps": 14.9,
+          "latencyMs": {
+            "mean": 5.32,
+            "p50": 2.96,
+            "p90": 7.35,
+            "p95": 18.27,
+            "p99": 50.85,
+            "p999": 91.26,
+            "max": 91.23
+          },
+          "status": {
+            "200": 448
+          },
+          "errors": {},
+          "dropped": 0
+        }
+      }
+    }
+  ],
+  "instances": {
+    "51b5a84e472a": 749,
+    "5f9f91816f60": 751,
+    "70bc6e3534dc": 750,
+    "956f6c22c563": 750
+  },
+  "checks": [],
+  "notes": {},
+  "interrupted": false,
+  "ok": true
+}

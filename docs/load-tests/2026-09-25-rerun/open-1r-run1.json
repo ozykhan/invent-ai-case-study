@@ -1,0 +1,99 @@
+{
+  "scenario": "browse",
+  "target": "http://localhost:8080",
+  "startedAt": "2026-09-25T16:45:58.785Z",
+  "options": {
+    "model": "open",
+    "rate": 4900,
+    "rampMs": 0,
+    "maxInflight": 10000,
+    "durationMs": 60000,
+    "warmupMs": 15000,
+    "connections": 10000,
+    "timeoutMs": 10000,
+    "seed": 42,
+    "maxPage": 5,
+    "maxErrorRate": 0
+  },
+  "phases": [
+    {
+      "name": "main",
+      "elapsedSeconds": 60,
+      "total": {
+        "count": 293876,
+        "rps": 4897.9,
+        "latencyMs": {
+          "mean": 146.37,
+          "p50": 2.85,
+          "p90": 76.03,
+          "p95": 365.06,
+          "p99": 4759.55,
+          "p999": 9076.74,
+          "max": 9764.69
+        },
+        "status": {
+          "200": 293876
+        },
+        "errors": {
+          "timeout": 125
+        },
+        "dropped": 0
+      },
+      "byLabel": {
+        "detail": {
+          "count": 88264,
+          "rps": 1471.1,
+          "latencyMs": {
+            "mean": 145.67,
+            "p50": 2.46,
+            "p90": 69.38,
+            "p95": 360.96,
+            "p99": 4829.18,
+            "p999": 9076.74,
+            "max": 9762.14
+          },
+          "status": {
+            "200": 88264
+          },
+          "errors": {
+            "timeout": 36
+          },
+          "dropped": 0
+        },
+        "list": {
+          "count": 205612,
+          "rps": 3426.9,
+          "latencyMs": {
+            "mean": 146.67,
+            "p50": 3.02,
+            "p90": 78.34,
+            "p95": 366.08,
+            "p99": 4722.69,
+            "p999": 9068.54,
+            "max": 9764.69
+          },
+          "status": {
+            "200": 205612
+          },
+          "errors": {
+            "timeout": 89
+          },
+          "dropped": 0
+        }
+      }
+    }
+  ],
+  "instances": {
+    "5f9f91816f60": 293876
+  },
+  "checks": [
+    {
+      "name": "error rate",
+      "ok": false,
+      "message": "0.04% (125 of 294001) > --max-error-rate 0.00%"
+    }
+  ],
+  "notes": {},
+  "interrupted": false,
+  "ok": false
+}

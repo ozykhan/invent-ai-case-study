@@ -1,0 +1,260 @@
+=== 2026-09-25T16:24:22Z
+NAME                      CPU %     MEM USAGE / LIMIT     NET I/O
+modaco-api-api-lb-4       0.03%     110.7MiB / 5.786GiB   13kB / 5.97kB
+modaco-api-api-lb-3       0.73%     112MiB / 5.786GiB     38.8kB / 73.2kB
+modaco-api-api-lb-2       0.05%     111.8MiB / 5.786GiB   33.5kB / 63.3kB
+modaco-api-api-lb-1       0.35%     124.8MiB / 5.786GiB   4.43GB / 5.22GB
+modaco-api-nginx-1        0.02%     13.65MiB / 5.786GiB   55.7kB / 54.6kB
+studio-hold-postgres-1    0.00%     45.92MiB / 5.786GiB   6.16MB / 11.1MB
+studio-hold-mailpit-1     0.80%     22.78MiB / 5.786GiB   122kB / 189kB
+studio-hold-local-kms-1   0.00%     13.67MiB / 5.786GiB   7.1kB / 3.77kB
+modaco-api-postgres-1     102.56%   226.6MiB / 5.786GiB   169MB / 50.1MB
+modaco-api-redis-1        0.27%     13.11MiB / 5.786GiB   1.44GB / 7.9GB
+modaco-api-localstack-1   0.02%     169.2MiB / 5.786GiB   39.4MB / 52.5MB
+=== 2026-09-25T16:24:27Z
+NAME                      CPU %     MEM USAGE / LIMIT     NET I/O
+modaco-api-api-lb-4       0.23%     112.9MiB / 5.786GiB   33.5kB / 64.2kB
+modaco-api-api-lb-3       0.07%     112.2MiB / 5.786GiB   57.5kB / 129kB
+modaco-api-api-lb-2       0.04%     112.3MiB / 5.786GiB   52.1kB / 118kB
+modaco-api-api-lb-1       0.78%     125.5MiB / 5.786GiB   4.43GB / 5.22GB
+modaco-api-nginx-1        0.02%     13.66MiB / 5.786GiB   166kB / 165kB
+studio-hold-postgres-1    0.00%     45.92MiB / 5.786GiB   6.16MB / 11.1MB
+studio-hold-mailpit-1     0.79%     22.77MiB / 5.786GiB   122kB / 189kB
+studio-hold-local-kms-1   0.00%     13.67MiB / 5.786GiB   7.1kB / 3.77kB
+modaco-api-postgres-1     101.87%   249.6MiB / 5.786GiB   169MB / 50.2MB
+modaco-api-redis-1        0.82%     13.11MiB / 5.786GiB   1.44GB / 7.9GB
+modaco-api-localstack-1   0.03%     169.2MiB / 5.786GiB   39.4MB / 52.5MB
+=== 2026-09-25T16:24:32Z
+NAME                      CPU %     MEM USAGE / LIMIT     NET I/O
+modaco-api-api-lb-4       0.06%     113.6MiB / 5.786GiB   70.6kB / 173kB
+modaco-api-api-lb-3       0.17%     112.8MiB / 5.786GiB   76.8kB / 186kB
+modaco-api-api-lb-2       0.67%     112.9MiB / 5.786GiB   89.4kB / 229kB
+modaco-api-api-lb-1       0.05%     125.7MiB / 5.786GiB   4.43GB / 5.22GB
+modaco-api-nginx-1        0.03%     13.66MiB / 5.786GiB   277kB / 276kB
+studio-hold-postgres-1    0.00%     45.92MiB / 5.786GiB   6.16MB / 11.1MB
+studio-hold-mailpit-1     0.86%     22.77MiB / 5.786GiB   122kB / 189kB
+studio-hold-local-kms-1   0.01%     13.67MiB / 5.786GiB   7.1kB / 3.77kB
+modaco-api-postgres-1     101.75%   247.7MiB / 5.786GiB   169MB / 50.3MB
+modaco-api-redis-1        0.25%     13.14MiB / 5.786GiB   1.44GB / 7.9GB
+modaco-api-localstack-1   0.03%     169.2MiB / 5.786GiB   39.4MB / 52.5MB
+=== 2026-09-25T16:24:37Z
+NAME                      CPU %     MEM USAGE / LIMIT     NET I/O
+modaco-api-api-lb-4       0.06%     113.8MiB / 5.786GiB   89.4kB / 229kB
+modaco-api-api-lb-3       0.47%     113MiB / 5.786GiB     114kB / 296kB
+modaco-api-api-lb-2       0.04%     113.2MiB / 5.786GiB   108kB / 284kB
+modaco-api-api-lb-1       0.14%     125.9MiB / 5.786GiB   4.43GB / 5.22GB
+modaco-api-nginx-1        0.01%     13.66MiB / 5.786GiB   410kB / 409kB
+studio-hold-postgres-1    0.00%     45.92MiB / 5.786GiB   6.16MB / 11.1MB
+studio-hold-mailpit-1     0.75%     22.93MiB / 5.786GiB   122kB / 189kB
+studio-hold-local-kms-1   0.00%     13.67MiB / 5.786GiB   7.1kB / 3.77kB
+modaco-api-postgres-1     102.47%   251.7MiB / 5.786GiB   169MB / 50.4MB
+modaco-api-redis-1        0.80%     13.09MiB / 5.786GiB   1.44GB / 7.9GB
+modaco-api-localstack-1   0.02%     169.2MiB / 5.786GiB   39.4MB / 52.5MB
+=== 2026-09-25T16:24:42Z
+NAME                      CPU %     MEM USAGE / LIMIT     NET I/O
+modaco-api-api-lb-4       2.41%     117.5MiB / 5.786GiB   178kB / 418kB
+modaco-api-api-lb-3       1.30%     114.9MiB / 5.786GiB   170kB / 369kB
+modaco-api-api-lb-2       0.28%     115MiB / 5.786GiB     145kB / 341kB
+modaco-api-api-lb-1       0.25%     128.3MiB / 5.786GiB   4.43GB / 5.22GB
+modaco-api-nginx-1        0.14%     15.57MiB / 5.786GiB   526kB / 521kB
+studio-hold-postgres-1    0.00%     45.84MiB / 5.786GiB   6.16MB / 11.1MB
+studio-hold-mailpit-1     0.85%     22.77MiB / 5.786GiB   122kB / 189kB
+studio-hold-local-kms-1   0.00%     13.67MiB / 5.786GiB   7.1kB / 3.77kB
+modaco-api-postgres-1     584.40%   990.5MiB / 5.786GiB   170MB / 50.5MB
+modaco-api-redis-1        0.98%     14.19MiB / 5.786GiB   1.44GB / 7.9GB
+modaco-api-localstack-1   0.06%     169.2MiB / 5.786GiB   39.4MB / 52.6MB
+=== 2026-09-25T16:24:47Z
+NAME                      CPU %     MEM USAGE / LIMIT     NET I/O
+modaco-api-api-lb-4       10.54%    124.1MiB / 5.786GiB   641kB / 1.24MB
+modaco-api-api-lb-3       5.75%     123.6MiB / 5.786GiB   686kB / 1.16MB
+modaco-api-api-lb-2       8.57%     126.2MiB / 5.786GiB   707kB / 1.3MB
+modaco-api-api-lb-1       5.53%     135MiB / 5.786GiB     4.43GB / 5.22GB
+modaco-api-nginx-1        1.45%     15.92MiB / 5.786GiB   2.57MB / 2.55MB
+studio-hold-postgres-1    0.00%     45.82MiB / 5.786GiB   6.16MB / 11.1MB
+studio-hold-mailpit-1     0.90%     22.77MiB / 5.786GiB   122kB / 189kB
+studio-hold-local-kms-1   0.00%     13.67MiB / 5.786GiB   7.1kB / 3.77kB
+modaco-api-postgres-1     542.93%   1017MiB / 5.786GiB    170MB / 51.2MB
+modaco-api-redis-1        1.84%     13.45MiB / 5.786GiB   1.44GB / 7.9GB
+modaco-api-localstack-1   16.49%    169.2MiB / 5.786GiB   39.4MB / 52.6MB
+=== 2026-09-25T16:24:52Z
+NAME                      CPU %     MEM USAGE / LIMIT     NET I/O
+modaco-api-api-lb-4       75.57%    217.1MiB / 5.786GiB   35.6MB / 43.4MB
+modaco-api-api-lb-3       73.90%    214.9MiB / 5.786GiB   35.7MB / 43.6MB
+modaco-api-api-lb-2       77.94%    227.9MiB / 5.786GiB   35.4MB / 43.3MB
+modaco-api-api-lb-1       85.45%    190.4MiB / 5.786GiB   4.47GB / 5.26GB
+modaco-api-nginx-1        59.91%    17.18MiB / 5.786GiB   153MB / 150MB
+studio-hold-postgres-1    0.00%     45.72MiB / 5.786GiB   6.16MB / 11.1MB
+studio-hold-mailpit-1     0.87%     22.77MiB / 5.786GiB   122kB / 189kB
+studio-hold-local-kms-1   0.00%     13.67MiB / 5.786GiB   7.1kB / 3.77kB
+modaco-api-postgres-1     23.22%    997.7MiB / 5.786GiB   174MB / 53MB
+modaco-api-redis-1        33.17%    13.86MiB / 5.786GiB   1.46GB / 8.03GB
+modaco-api-localstack-1   31.75%    169.2MiB / 5.786GiB   39.4MB / 52.6MB
+=== 2026-09-25T16:24:57Z
+NAME                      CPU %     MEM USAGE / LIMIT     NET I/O
+modaco-api-api-lb-4       77.12%    232.1MiB / 5.786GiB   87.5MB / 105MB
+modaco-api-api-lb-3       71.44%    218.4MiB / 5.786GiB   87.1MB / 104MB
+modaco-api-api-lb-2       72.70%    228.6MiB / 5.786GiB   86.9MB / 104MB
+modaco-api-api-lb-1       88.92%    231.5MiB / 5.786GiB   4.52GB / 5.32GB
+modaco-api-nginx-1        66.34%    17.91MiB / 5.786GiB   377MB / 372MB
+studio-hold-postgres-1    0.00%     45.69MiB / 5.786GiB   6.16MB / 11.1MB
+studio-hold-mailpit-1     0.87%     22.77MiB / 5.786GiB   122kB / 189kB
+studio-hold-local-kms-1   0.00%     13.67MiB / 5.786GiB   7.1kB / 3.77kB
+modaco-api-postgres-1     0.00%     996.1MiB / 5.786GiB   174MB / 53MB
+modaco-api-redis-1        34.74%    13.87MiB / 5.786GiB   1.5GB / 8.23GB
+modaco-api-localstack-1   27.39%    169.2MiB / 5.786GiB   39.4MB / 52.6MB
+=== 2026-09-25T16:25:02Z
+NAME                      CPU %     MEM USAGE / LIMIT     NET I/O
+modaco-api-api-lb-4       83.20%    232.2MiB / 5.786GiB   151MB / 180MB
+modaco-api-api-lb-3       80.13%    220MiB / 5.786GiB     151MB / 179MB
+modaco-api-api-lb-2       81.35%    228.3MiB / 5.786GiB   150MB / 179MB
+modaco-api-api-lb-1       85.38%    241.5MiB / 5.786GiB   4.58GB / 5.4GB
+modaco-api-nginx-1        103.38%   17.54MiB / 5.786GiB   654MB / 644MB
+studio-hold-postgres-1    0.00%     45.69MiB / 5.786GiB   6.16MB / 11.1MB
+studio-hold-mailpit-1     0.95%     22.77MiB / 5.786GiB   122kB / 189kB
+studio-hold-local-kms-1   0.41%     13.67MiB / 5.786GiB   7.1kB / 3.77kB
+modaco-api-postgres-1     2.61%     212.9MiB / 5.786GiB   174MB / 53MB
+modaco-api-redis-1        34.23%    13.74MiB / 5.786GiB   1.54GB / 8.46GB
+modaco-api-localstack-1   0.03%     169.2MiB / 5.786GiB   39.4MB / 52.6MB
+=== 2026-09-25T16:25:07Z
+NAME                      CPU %     MEM USAGE / LIMIT     NET I/O
+modaco-api-api-lb-4       83.16%    232.3MiB / 5.786GiB   220MB / 261MB
+modaco-api-api-lb-3       84.58%    223.5MiB / 5.786GiB   219MB / 261MB
+modaco-api-api-lb-2       85.67%    228.9MiB / 5.786GiB   219MB / 260MB
+modaco-api-api-lb-1       80.60%    241.7MiB / 5.786GiB   4.65GB / 5.48GB
+modaco-api-nginx-1        101.03%   17.28MiB / 5.786GiB   955MB / 942MB
+studio-hold-postgres-1    0.00%     45.69MiB / 5.786GiB   6.16MB / 11.1MB
+studio-hold-mailpit-1     1.11%     22.77MiB / 5.786GiB   122kB / 189kB
+studio-hold-local-kms-1   0.00%     13.67MiB / 5.786GiB   7.1kB / 3.77kB
+modaco-api-postgres-1     0.00%     148.6MiB / 5.786GiB   174MB / 53MB
+modaco-api-redis-1        35.55%    13.73MiB / 5.786GiB   1.59GB / 8.72GB
+modaco-api-localstack-1   0.02%     169.2MiB / 5.786GiB   39.4MB / 52.6MB
+=== 2026-09-25T16:25:12Z
+NAME                      CPU %     MEM USAGE / LIMIT     NET I/O
+modaco-api-api-lb-4       91.43%    232.3MiB / 5.786GiB   287MB / 341MB
+modaco-api-api-lb-3       72.37%    229.6MiB / 5.786GiB   287MB / 341MB
+modaco-api-api-lb-2       69.31%    228.8MiB / 5.786GiB   286MB / 340MB
+modaco-api-api-lb-1       67.47%    241.6MiB / 5.786GiB   4.72GB / 5.56GB
+modaco-api-nginx-1        56.42%    17.28MiB / 5.786GiB   1.25GB / 1.23GB
+studio-hold-postgres-1    0.00%     45.69MiB / 5.786GiB   6.16MB / 11.1MB
+studio-hold-mailpit-1     1.42%     22.77MiB / 5.786GiB   122kB / 189kB
+studio-hold-local-kms-1   0.00%     13.67MiB / 5.786GiB   7.1kB / 3.77kB
+modaco-api-postgres-1     0.00%     148.6MiB / 5.786GiB   174MB / 53MB
+modaco-api-redis-1        35.60%    13.7MiB / 5.786GiB    1.63GB / 8.98GB
+modaco-api-localstack-1   0.02%     169.2MiB / 5.786GiB   39.4MB / 52.6MB
+=== 2026-09-25T16:25:17Z
+NAME                      CPU %     MEM USAGE / LIMIT     NET I/O
+modaco-api-api-lb-4       80.91%    233MiB / 5.786GiB     342MB / 405MB
+modaco-api-api-lb-3       75.35%    228.7MiB / 5.786GiB   342MB / 406MB
+modaco-api-api-lb-2       82.97%    228.7MiB / 5.786GiB   341MB / 405MB
+modaco-api-api-lb-1       76.57%    241.7MiB / 5.786GiB   4.77GB / 5.62GB
+modaco-api-nginx-1        71.16%    17.25MiB / 5.786GiB   1.49GB / 1.47GB
+studio-hold-postgres-1    0.00%     45.69MiB / 5.786GiB   6.16MB / 11.1MB
+studio-hold-mailpit-1     0.00%     22.77MiB / 5.786GiB   122kB / 189kB
+studio-hold-local-kms-1   0.00%     13.67MiB / 5.786GiB   7.1kB / 3.77kB
+modaco-api-postgres-1     0.82%     148.6MiB / 5.786GiB   174MB / 53MB
+modaco-api-redis-1        35.80%    14.43MiB / 5.786GiB   1.67GB / 9.18GB
+modaco-api-localstack-1   0.02%     169.2MiB / 5.786GiB   39.4MB / 52.6MB
+=== 2026-09-25T16:25:22Z
+NAME                      CPU %     MEM USAGE / LIMIT     NET I/O
+modaco-api-api-lb-4       71.80%    232.7MiB / 5.786GiB   408MB / 484MB
+modaco-api-api-lb-3       93.17%    228.7MiB / 5.786GiB   409MB / 485MB
+modaco-api-api-lb-2       72.28%    229.1MiB / 5.786GiB   408MB / 484MB
+modaco-api-api-lb-1       69.61%    242.1MiB / 5.786GiB   4.84GB / 5.7GB
+modaco-api-nginx-1        65.60%    17.56MiB / 5.786GiB   1.78GB / 1.76GB
+studio-hold-postgres-1    0.00%     45.69MiB / 5.786GiB   6.16MB / 11.1MB
+studio-hold-mailpit-1     0.00%     22.77MiB / 5.786GiB   122kB / 189kB
+studio-hold-local-kms-1   0.00%     13.67MiB / 5.786GiB   7.1kB / 3.77kB
+modaco-api-postgres-1     0.00%     148.6MiB / 5.786GiB   174MB / 53MB
+modaco-api-redis-1        36.28%    13.69MiB / 5.786GiB   1.72GB / 9.43GB
+modaco-api-localstack-1   0.03%     169.2MiB / 5.786GiB   39.4MB / 52.6MB
+=== 2026-09-25T16:25:27Z
+NAME                      CPU %     MEM USAGE / LIMIT     NET I/O
+modaco-api-api-lb-4       83.84%    232.1MiB / 5.786GiB   469MB / 556MB
+modaco-api-api-lb-3       78.03%    228.6MiB / 5.786GiB   470MB / 556MB
+modaco-api-api-lb-2       82.18%    228MiB / 5.786GiB     469MB / 556MB
+modaco-api-api-lb-1       78.71%    242.3MiB / 5.786GiB   4.9GB / 5.77GB
+modaco-api-nginx-1        88.86%    17.61MiB / 5.786GiB   2.04GB / 2.03GB
+studio-hold-postgres-1    0.00%     45.69MiB / 5.786GiB   6.16MB / 11.1MB
+studio-hold-mailpit-1     0.00%     22.77MiB / 5.786GiB   122kB / 189kB
+studio-hold-local-kms-1   0.00%     13.67MiB / 5.786GiB   7.1kB / 3.77kB
+modaco-api-postgres-1     0.22%     148.6MiB / 5.786GiB   174MB / 53MB
+modaco-api-redis-1        34.84%    13.69MiB / 5.786GiB   1.76GB / 9.66GB
+modaco-api-localstack-1   0.02%     169.2MiB / 5.786GiB   39.4MB / 52.6MB
+=== 2026-09-25T16:25:32Z
+NAME                      CPU %     MEM USAGE / LIMIT     NET I/O
+modaco-api-api-lb-4       80.32%    232.5MiB / 5.786GiB   526MB / 623MB
+modaco-api-api-lb-3       86.47%    229.2MiB / 5.786GiB   537MB / 636MB
+modaco-api-api-lb-2       75.72%    228.5MiB / 5.786GiB   536MB / 636MB
+modaco-api-api-lb-1       70.47%    242.8MiB / 5.786GiB   4.97GB / 5.85GB
+modaco-api-nginx-1        69.64%    17.29MiB / 5.786GiB   2.34GB / 2.32GB
+studio-hold-postgres-1    0.00%     45.69MiB / 5.786GiB   6.16MB / 11.1MB
+studio-hold-mailpit-1     0.05%     22.77MiB / 5.786GiB   122kB / 189kB
+studio-hold-local-kms-1   0.02%     13.67MiB / 5.786GiB   7.1kB / 3.77kB
+modaco-api-postgres-1     0.85%     148.6MiB / 5.786GiB   174MB / 53MB
+modaco-api-redis-1        35.06%    13.95MiB / 5.786GiB   1.8GB / 9.92GB
+modaco-api-localstack-1   0.03%     169.2MiB / 5.786GiB   39.4MB / 52.6MB
+=== 2026-09-25T16:25:37Z
+NAME                      CPU %     MEM USAGE / LIMIT     NET I/O
+modaco-api-api-lb-4       79.45%    232.5MiB / 5.786GiB   606MB / 718MB
+modaco-api-api-lb-3       79.87%    230.4MiB / 5.786GiB   605MB / 717MB
+modaco-api-api-lb-2       88.70%    228.6MiB / 5.786GiB   605MB / 716MB
+modaco-api-api-lb-1       77.32%    242.1MiB / 5.786GiB   5.04GB / 5.93GB
+modaco-api-nginx-1        93.79%    17.52MiB / 5.786GiB   2.64GB / 2.62GB
+studio-hold-postgres-1    0.00%     45.69MiB / 5.786GiB   6.16MB / 11.1MB
+studio-hold-mailpit-1     0.00%     22.77MiB / 5.786GiB   122kB / 189kB
+studio-hold-local-kms-1   0.00%     13.67MiB / 5.786GiB   7.1kB / 3.77kB
+modaco-api-postgres-1     0.00%     148.6MiB / 5.786GiB   174MB / 53MB
+modaco-api-redis-1        36.40%    13.73MiB / 5.786GiB   1.85GB / 10.2GB
+modaco-api-localstack-1   0.06%     198.9MiB / 5.786GiB   39.4MB / 52.6MB
+=== 2026-09-25T16:25:42Z
+NAME                      CPU %     MEM USAGE / LIMIT     NET I/O
+modaco-api-api-lb-4       82.89%    232.4MiB / 5.786GiB   682MB / 808MB
+modaco-api-api-lb-3       83.49%    230.9MiB / 5.786GiB   681MB / 807MB
+modaco-api-api-lb-2       86.06%    230.6MiB / 5.786GiB   681MB / 807MB
+modaco-api-api-lb-1       85.54%    242.8MiB / 5.786GiB   5.11GB / 6.02GB
+modaco-api-nginx-1        80.58%    17.4MiB / 5.786GiB    2.9GB / 2.88GB
+studio-hold-postgres-1    0.00%     45.69MiB / 5.786GiB   6.16MB / 11.1MB
+studio-hold-mailpit-1     0.00%     22.77MiB / 5.786GiB   122kB / 189kB
+studio-hold-local-kms-1   0.00%     13.67MiB / 5.786GiB   7.1kB / 3.77kB
+modaco-api-postgres-1     0.00%     148.6MiB / 5.786GiB   174MB / 53MB
+modaco-api-redis-1        36.24%    13.7MiB / 5.786GiB    1.9GB / 10.5GB
+modaco-api-localstack-1   0.02%     169.2MiB / 5.786GiB   39.4MB / 52.6MB
+=== 2026-09-25T16:25:47Z
+NAME                      CPU %     MEM USAGE / LIMIT     NET I/O
+modaco-api-api-lb-4       80.47%    233.4MiB / 5.786GiB   742MB / 879MB
+modaco-api-api-lb-3       81.93%    230.4MiB / 5.786GiB   741MB / 878MB
+modaco-api-api-lb-2       79.52%    230.2MiB / 5.786GiB   740MB / 877MB
+modaco-api-api-lb-1       86.49%    243MiB / 5.786GiB     5.17GB / 6.09GB
+modaco-api-nginx-1        89.39%    17.24MiB / 5.786GiB   3.23GB / 3.21GB
+studio-hold-postgres-1    0.00%     45.7MiB / 5.786GiB    6.16MB / 11.1MB
+studio-hold-mailpit-1     0.00%     22.77MiB / 5.786GiB   122kB / 189kB
+studio-hold-local-kms-1   0.00%     13.67MiB / 5.786GiB   7.1kB / 3.77kB
+modaco-api-postgres-1     1.10%     148.6MiB / 5.786GiB   174MB / 53MB
+modaco-api-redis-1        34.91%    13.69MiB / 5.786GiB   1.94GB / 10.7GB
+modaco-api-localstack-1   0.03%     169.2MiB / 5.786GiB   39.4MB / 52.6MB
+=== 2026-09-25T16:25:52Z
+NAME                      CPU %     MEM USAGE / LIMIT     NET I/O
+modaco-api-api-lb-4       77.46%    231.8MiB / 5.786GiB   791MB / 937MB
+modaco-api-api-lb-3       84.42%    230.7MiB / 5.786GiB   791MB / 936MB
+modaco-api-api-lb-2       67.64%    230.7MiB / 5.786GiB   790MB / 935MB
+modaco-api-api-lb-1       66.69%    242.9MiB / 5.786GiB   5.22GB / 6.15GB
+modaco-api-nginx-1        57.91%    17.53MiB / 5.786GiB   3.45GB / 3.42GB
+studio-hold-postgres-1    0.00%     45.69MiB / 5.786GiB   6.16MB / 11.1MB
+studio-hold-mailpit-1     0.00%     22.77MiB / 5.786GiB   122kB / 189kB
+studio-hold-local-kms-1   0.00%     13.67MiB / 5.786GiB   7.1kB / 3.77kB
+modaco-api-postgres-1     0.00%     148.6MiB / 5.786GiB   174MB / 53MB
+modaco-api-redis-1        35.52%    13.73MiB / 5.786GiB   1.98GB / 10.9GB
+modaco-api-localstack-1   0.03%     169.2MiB / 5.786GiB   39.4MB / 52.6MB
+=== 2026-09-25T16:25:57Z
+NAME                      CPU %     MEM USAGE / LIMIT     NET I/O
+modaco-api-api-lb-4       0.14%     232.3MiB / 5.786GiB   831MB / 983MB
+modaco-api-api-lb-3       0.18%     230.3MiB / 5.786GiB   830MB / 983MB
+modaco-api-api-lb-2       0.18%     230.8MiB / 5.786GiB   829MB / 982MB
+modaco-api-api-lb-1       0.70%     242.2MiB / 5.786GiB   5.26GB / 6.2GB
+modaco-api-nginx-1        0.25%     15.32MiB / 5.786GiB   3.62GB / 3.59GB
+studio-hold-postgres-1    0.00%     45.69MiB / 5.786GiB   6.16MB / 11.1MB
+studio-hold-mailpit-1     0.00%     22.77MiB / 5.786GiB   122kB / 189kB
+studio-hold-local-kms-1   0.00%     13.67MiB / 5.786GiB   7.1kB / 3.77kB
+modaco-api-postgres-1     0.00%     148.6MiB / 5.786GiB   174MB / 53MB
+modaco-api-redis-1        1.00%     13.68MiB / 5.786GiB   2GB / 11GB
+modaco-api-localstack-1   0.15%     169.2MiB / 5.786GiB   39.4MB / 52.6MB
