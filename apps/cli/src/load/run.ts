@@ -40,6 +40,7 @@ export async function runLoad(client: ApiClient, scenario: Scenario, o: RunOptio
     client,
     durationMs: o.durationMs,
     log: io.log,
+    aborted: () => io.signal?.aborted === true,
     async warmup(source: LoadSource = scenario) {
       if (o.warmupMs <= 0 || io.signal?.aborted) return;
       io.log(`warmup ${o.warmupMs / 1000}s (not recorded)`);

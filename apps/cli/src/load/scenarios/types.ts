@@ -9,7 +9,15 @@ export interface ScenarioOptions {
   maxPage: number;
   /** Relative weights by request label; the scenario's default mix when absent. */
   mix?: Record<string, number>;
+  /**
+   * How long a load-test promotion stays live after it is created. `load` passes warmup + duration + 60 s: long enough
+   * to outlast the run, short enough that a run killed before its cleanup (a second Ctrl-C) leaves no discount behind
+   * for long. Default 1 h.
+   */
+  promotionTtlMs?: number;
 }
+
+export const DEFAULT_PROMOTION_TTL_MS = 3_600_000;
 
 /** What runLoad hands a scenario that orchestrates its own phases (flash-sale). */
 export interface PhaseRunner {
@@ -17,6 +25,8 @@ export interface PhaseRunner {
   /** The --duration budget for all recorded phases together. */
   readonly durationMs: number;
   log(msg: string): void;
+  /** True once the run was interrupted (SIGINT). A scenario must then stop starting new work, writes above all. */
+  aborted(): boolean;
   /** Runs --warmup of unrecorded load. */
   warmup(source?: LoadSource): Promise<void>;
   /** Runs and records one phase. */

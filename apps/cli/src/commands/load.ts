@@ -68,7 +68,8 @@ export function registerLoad(program: Command): void {
       const maxPage = flags.maxPage ?? 5;
       const seed = flags.seed ?? Math.floor(Math.random() * 2 ** 31);
       const connections = flags.connections ?? (model.kind === 'closed' ? Math.max(model.concurrency, 64) : 256);
-      const scenario = createScenario(name, { category: flags.category, maxPage, mix });
+      // Load-test promotions expire a minute after the run would end, so a killed run cleans up after itself.
+      const scenario = createScenario(name, { category: flags.category, maxPage, mix, promotionTtlMs: warmupMs + durationMs + 60_000 });
 
       const client = new ApiClient({ baseUrl: g.url, timeoutMs: g.timeoutMs, connections });
       const ac = new AbortController();

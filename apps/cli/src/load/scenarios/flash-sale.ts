@@ -2,7 +2,7 @@ import type { Product } from '../../api-types';
 import type { ApiClient } from '../../client';
 import { ApiError, SetupError } from '../../errors';
 import type { Check } from '../report';
-import type { Scenario, ScenarioOptions } from './types';
+import { DEFAULT_PROMOTION_TTL_MS, type Scenario, type ScenarioOptions } from './types';
 
 const MID_SALE_BASE = '20.00';
 const MID_SALE_EXPECTED = '10.00'; // 50% off
@@ -10,10 +10,11 @@ const MID_SALE_EXPECTED = '10.00'; // 50% off
 /**
  * Port of scripts/demo-flash-sale.ts onto the engine. It records a "before" phase, turns on a 50% category
  * promotion, and records an "after" phase while a product created mid-sale must read back discounted on its first
- * read. The promotion is always cancelled at the end.
+ * read. The promotion is always cancelled at the end. An interrupt before the sale starts ends the run with no writes.
  */
 export function createFlashSale(opts: ScenarioOptions): Scenario {
   const slug = opts.category ?? 'accessories';
+  const ttlMs = opts.promotionTtlMs ?? DEFAULT_PROMOTION_TTL_MS;
   let categoryId = 0;
   let firstItemPrice = '';
 
@@ -44,17 +45,22 @@ export function createFlashSale(opts: ScenarioOptions): Scenario {
       await runner.warmup();
       const beforeMs = Math.floor(runner.durationMs / 3);
       await runner.phase('before', beforeMs);
+      // Interrupted during warmup or `before`: stop here. Starting the sale now would write a category-wide discount
+      // and record a check that never ran under load.
+      if (runner.aborted()) return;
       runner.note('firstItemPriceBefore', firstItemPrice || '-');
 
       const now = Date.now();
       const promo = await client.createPromotion({
         name: 'Flash sale load test', discountType: 'percentage', value: '50',
-        startsAt: new Date(now - 1000).toISOString(), endsAt: new Date(now + 3_600_000).toISOString(),
+        startsAt: new Date(now - 1000).toISOString(), endsAt: new Date(now + ttlMs).toISOString(),
         target: { categoryId },
       });
       runner.note('promotionId', promo.id);
       runner.log(`flash sale created -> promotion ${promo.id}`);
       try {
+        // Interrupted while the promotion was being created: cancel it (finally) without the product or the check.
+        if (runner.aborted()) return;
         const [, check] = await Promise.all([
           runner.phase('after', runner.durationMs - beforeMs),
           verifyMidSaleProduct(client, categoryId, promo.id),

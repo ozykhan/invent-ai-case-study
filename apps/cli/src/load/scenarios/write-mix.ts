@@ -1,7 +1,7 @@
 import type { RequestSpec } from '../engine';
 import { pickWeighted, type Rng } from '../rng';
 import { detailRequest, listRequest, sampleCatalog, type CatalogSample } from './catalog';
-import type { Scenario, ScenarioOptions } from './types';
+import { DEFAULT_PROMOTION_TTL_MS, type Scenario, type ScenarioOptions } from './types';
 
 export const WRITE_MIX_LABELS = ['list', 'detail', 'stock', 'promo'] as const;
 const DEFAULT_MIX = { list: 60, detail: 25, stock: 14, promo: 1 };
@@ -12,6 +12,7 @@ const DEFAULT_MIX = { list: 60, detail: 25, stock: 14, promo: 1 };
  */
 export function createWriteMix(opts: ScenarioOptions): Scenario {
   const mix = opts.mix ?? DEFAULT_MIX;
+  const ttlMs = opts.promotionTtlMs ?? DEFAULT_PROMOTION_TTL_MS;
   let sample: CatalogSample = { total: 0, ids: [], slugs: [] };
   /** Created, no cancel sent yet: the next promo slot cancels the oldest. */
   const open: string[] = [];
@@ -31,9 +32,11 @@ export function createWriteMix(opts: ScenarioOptions): Scenario {
       label: 'promo:create', method: 'POST', path: '/promotions',
       body: {
         name: 'write-mix load test', discountType: 'percentage', value: '10',
-        startsAt: new Date(now - 1000).toISOString(), endsAt: new Date(now + 3_600_000).toISOString(),
+        startsAt: new Date(now - 1000).toISOString(), endsAt: new Date(now + ttlMs).toISOString(),
         target: { productId: rng.pick(sample.ids) },
       },
+      // On an interrupted run a create can answer after the drain window, and so after cleanup ran: that promotion is
+      // never cancelled, but it expires on its own `ttlMs` after creation.
       onResponse: (status, body) => {
         const created = (body as { id?: unknown } | undefined)?.id;
         if (status === 201 && typeof created === 'string') { open.push(created); uncancelled.add(created); }

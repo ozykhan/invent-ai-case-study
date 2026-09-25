@@ -88,6 +88,22 @@ describe('write-mix', () => {
     expect(Math.abs(byLabel['promo:create']!.count - byLabel['promo:cancel']!.count)).toBeLessThanOrEqual(1);
     expect(stub.state.openPromotions.size).toBe(0);
   });
+
+  it('gives its promotions an end time just past the run, so a killed run cannot leave them on for long', async () => {
+    const endsAts: number[] = [];
+    const spy: ApiClient = Object.create(client) as ApiClient;
+    spy.send = (spec) => {
+      if (spec.label === 'promo:create') endsAts.push(Date.parse((spec.body as { endsAt: string }).endsAt));
+      return client.send(spec);
+    };
+    const before = Date.now();
+    await runLoad(spy, createScenario('write-mix', { maxPage: 5, mix: { promo: 1 }, promotionTtlMs: 61_000 }), opts({ model: { kind: 'closed', concurrency: 1 }, durationMs: 200 }), quiet);
+    expect(endsAts.length).toBeGreaterThan(0);
+    for (const endsAt of endsAts) {
+      expect(endsAt).toBeGreaterThan(before + 61_000 - 1_000);
+      expect(endsAt).toBeLessThan(Date.now() + 61_000 + 1_000);
+    }
+  });
 });
 
 describe('flash-sale', () => {
@@ -100,6 +116,41 @@ describe('flash-sale', () => {
     expect(doc.notes.firstItemPriceBefore).toBe('20.00');
     expect(doc.ok).toBe(true);
     expect(stub.state.openPromotions.size).toBe(0);
+  });
+
+  it('stops after an interrupted before phase: no promotion, no product, no check', async () => {
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 150);
+    const doc = await runLoad(client, createScenario('flash-sale', { maxPage: 5, category: 'shoes' }), opts({ durationMs: 30_000 }), { ...quiet, signal: ac.signal });
+    expect(doc.interrupted).toBe(true);
+    expect(doc.phases.map((p) => p.name)).toEqual(['before']);
+    expect(doc.checks).toEqual([]);
+    expect(doc.notes.promotionId).toBeUndefined();
+    expect(stub.state.hits.get('POST /promotions') ?? 0).toBe(0);
+    expect(stub.state.hits.get('POST /products') ?? 0).toBe(0);
+  });
+
+  it('stops after an interrupted warmup without recording a phase or writing', async () => {
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 150);
+    const doc = await runLoad(client, createScenario('flash-sale', { maxPage: 5, category: 'shoes' }), opts({ warmupMs: 30_000 }), { ...quiet, signal: ac.signal });
+    expect(doc.interrupted).toBe(true);
+    expect(doc.phases).toEqual([]);
+    expect(doc.checks).toEqual([]);
+    expect(stub.state.hits.get('POST /promotions') ?? 0).toBe(0);
+    expect(stub.state.hits.get('POST /products') ?? 0).toBe(0);
+  });
+
+  it('gives its promotion an end time just past the run, so a killed run cannot leave it on for long', async () => {
+    const created: Array<{ startsAt: string; endsAt: string }> = [];
+    const spy: ApiClient = Object.create(client) as ApiClient;
+    spy.createPromotion = async (input) => { created.push(input); return client.createPromotion(input); };
+    const before = Date.now();
+    await runLoad(spy, createScenario('flash-sale', { maxPage: 5, category: 'shoes', promotionTtlMs: 61_000 }), opts({ durationMs: 300 }), quiet);
+    expect(created).toHaveLength(1);
+    const endsAt = Date.parse(created[0]!.endsAt);
+    expect(endsAt).toBeGreaterThan(before + 61_000 - 1_000);
+    expect(endsAt).toBeLessThan(Date.now() + 61_000 + 1_000);
   });
 
   it('fails the check but still cancels when the new product is not discounted', async () => {
