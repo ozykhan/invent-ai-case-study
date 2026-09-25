@@ -112,7 +112,8 @@ How the CPU figures below are computed:
 | `health-*.txt` | scaling output and the distinct instance ids seen through nginx before the run |
 | `cgroup-*.txt` | each replica's `cpu.stat` (usage, `nr_periods`, `nr_throttled`, `throttled_usec`) before and after |
 | `prewarm-*.txt` | the pre-warm before each open-model and write-mix run |
-| `*-coldstart-*`, `drain-*` | the two open-model attempts on a cold cache that collapsed |
+| `*-coldstart-failed*`, `drain-open-4r-coldstart-failed.txt` | the two open-model attempts on a cold cache that collapsed |
+| `*-coldstart-*-fixed*` | the cold-start runs after the fix (see "Fix" below), with `drain-*` Postgres drain checks |
 | `cold-page-build.txt` | cold vs warm build time of single listing pages (curl, idle stack), captured after the runs |
 
 ## Closed model: 100 workers, 60 s recorded after a 15 s warm-up
@@ -239,17 +240,85 @@ seconds of load and never recovered:
 - **No recovery.** 5 minutes after the client exited, Postgres was still at about 590% with 40 active queries
   (`drain-open-4r-coldstart-failed.txt`). It went idle only when the replicas were restarted: they keep working through
   queued queries whose clients have gone.
-- **Mechanism.** On an idle stack, building one cold category page (62k products) takes 168 to 221 ms, mostly 170 to
-  180 ms. That was measured afterwards with single `curl` requests through both the dev API and one replica behind
-  nginx, captured in `cold-page-build.txt`. It is just under the 200 ms a concurrent reader waits for a build (`waitMs`
-  in `packages/core/src/cache/read-through.ts`), and the same page served warm takes about 2 ms. Under load, 40
-  concurrent builds share 6 CPUs, so each build takes longer than 200 ms. The pre-warm's cold phase shows this, with
-  requests taking seconds. Readers then give up waiting and run their own query, which adds more load. This feedback
-  loop is our reading of the numbers above; individual build times under load were not instrumented. (An earlier,
-  uncaptured spot check right after a restart gave 220 to 240 ms; the capture's first request on each path, 217 to
-  221 ms, matches that.)
+- **Cold page cost.** On an idle stack, building one cold category page (62k products) takes 168 to 221 ms, mostly 170
+  to 180 ms, against about 2 ms served warm. That was measured afterwards with single `curl` requests through both the
+  dev API and one replica behind nginx (`cold-page-build.txt`).
 - **The pre-warm survived it.** The closed-model pre-warm (at most 100 requests in flight) filled the same cold cache
   without collapsing. Its p99.9 was 1.5 to 2.6 s and its max 4.3 to 7.4 s while it rebuilt.
 
-Not tested: whether 1 replica (a pool of 10 rather than 40) collapses the same way, and the rate at which the collapse
-starts.
+### Root cause (confirmed)
+
+A follow-up investigation reproduced the collapse with 1 replica (the dev API, pool of 10) and instrumented it: every
+readThrough outcome, every query's pool-acquire wait and execution time, the pool queue, and the requests whose client
+had already gone. The instrumentation was a temporary patch and is not in the repository; its key numbers are below.
+
+- **Threshold.** 1 replica collapses from about 125 to 150 req/s on a cold cache. 100 req/s recovered in about 16 s,
+  150 did not recover within its 30 s run. At 300 req/s, 96.5% of requests failed (8,686 of 9,000 timeouts). The
+  original 4-replica run offered 1,225 req/s per replica, about 10x the threshold.
+- **1. Coalescing leaked on two paths.** A waiter gave up after 200 ms (`waitMs`) and ran its own query. Separately,
+  the 2 s lock (`lockMs`) expired while its holder was still queued for a pool connection, so waiters saw no lock and
+  built too, and a second holder took the key. At 300 req/s, 3,019 page queries ran for 80 keys. Raising either timeout
+  alone still collapsed (79% and 96% errors). Raising both (5 s wait, 60 s lock) gave exactly 82 page queries, 0 errors
+  at 300 req/s, and recovery within about 5 s at 1,225 req/s.
+- **2. Cold pages are expensive.** The page query scans the whole category with a lateral promotion probe per row,
+  about 190 ms idle and about 360 ms under load, of which the Postgres JIT is 83 to 131 ms. With JIT off it is 104 to
+  108 ms idle; that alone turned a 200 req/s collapse into recovery in about 13 s.
+- **3. Nothing shed load.** The pool had no acquire timeout, Postgres no `statement_timeout`, and handlers kept going
+  after the client closed. 95.5% of all queries ran for requests whose client had already gone, 11,067 requests
+  queued for a pool connection, and Postgres stayed busy for about 81 s after a 30 s run.
+- **4. Holders starved in the same FIFO pool queue** as the bypass builds: a holder's queries waited 9.1 s on average
+  for a connection against 154 ms of execution, which is what pushed builds past both timeouts.
+- The lock was also released with an unconditional `DEL`, so an old holder could delete a newer holder's lock.
+
+### Fix
+
+Three changes (ADR §4 and §11):
+- **Coalescing fails closed** (`packages/core/src/cache/read-through.ts`). A waiter polls, backing off from 20 to
+  100 ms, for up to 5 s. It returns the entry as soon as it appears. If the holder built with `cache: false` it builds
+  directly. If the holder is gone without an entry (its build failed or its lock expired), one waiter takes the lock
+  over and builds; the others keep waiting. At 5 s it returns 503 `overloaded` (`CacheWaitTimeoutError`) and never
+  builds. The lock holds a random token with a 30 s TTL and is released by an atomic compare-and-delete.
+- **Load shedding** (`apps/api`). The pool fails an acquire after 2 s, Postgres cancels a statement after 5 s, and
+  both answer 503 `overloaded` with `Retry-After: 1`. A request-scoped `AbortSignal` fires when the client disconnects,
+  and every database phase of the product read path checks it first, so no query is started for a client that is gone.
+- **JIT off** for the API's connections (`DB_JIT`, default off).
+
+The first 4-replica run with only the first version of the coalescing change (waiters still built directly whenever
+the lock was released without an entry; `*-open-4r-coldstart-fixed-attempt1.*`) failed 71% of requests. A holder whose
+pool acquire timed out released its lock, all its waiters built directly and uncached, and their queries starved the
+next holder: about 1,330 page queries ran in the recorded phase and about 57k more failed in the pool queue, for 80
+keys. The takeover rule above closed that path.
+
+**Before and after, cold cache, open model, `--warmup 0s --seed 42`.** Before is `main` at db02519 (1 replica from the
+investigation, 4 replicas from `open-4r-coldstart-failed.*`). After is this branch at `add1e75`. Latency in ms over 2xx
+responses; "page queries" counts cold listing queries in the recorded phase (`products` sequential scans in
+`pg_stat_user_tables`, sampled every second in `pgmon-*-fixed.txt`, from the first sample of the recorded phase).
+
+| Run | Requests | 200 | 503 overloaded | Transport errors | Dropped | p50 | p99 | p99.9 | Page queries | Postgres idle after the client stopped |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 replica, 300/s, before | 9,000 | 314 | 0 | 8,686 timeouts | 0 | – | – | – | 3,019 | after about 81 s |
+| 1 replica, 300/s, after | 9,000 | 9,000 | 0 | 0 | 0 | 1.35 | 1,866.75 | 2,033.66 | 87 | at the first sample (under 1 s) |
+| 1 replica, 1,225/s, after | 36,751 | 36,751 | 0 | 0 | 0 | 0.60 | 2,256.90 | 2,482.18 | 86 | at the first sample |
+| 4 replicas, 4,900/s, before | 294,001 | 7 | 0 | 46,541 | 247,453 | 1,233.92 | 5,652.48 | 5,652.48 | – | not within 5 min; restart needed |
+| 4 replicas, 4,900/s, attempt 1 | 294,001 | 55,078 | 135,214 | 126 | 103,583 | 56.99 | 6,221.82 | 8,953.86 | about 1,330 | at the first sample |
+| 4 replicas, 4,900/s, after | 294,001 | 256,131 | 14,652 | 46 timeouts | 23,172 | 1.05 | 5,378.05 | 7,389.18 | 138 | at the first sample |
+
+- **1 replica.** No errors at either rate. The whole tail is the cold fill: the cache was full within about 2 s, and
+  from the 10 s progress line on, p99 was 2.5 to 7.8 ms. Postgres had 0 active queries in the first sample after the
+  client exited (`drain-open-1r-coldstart-{300,1225}-fixed.txt`). Each 1-replica run used a fresh dev API process
+  (`node --import tsx src/server.ts` in `apps/api`).
+- **4 replicas.** 87% of the offered 294,001 requests succeeded (94.6% of those sent), against 7 before. The errors and
+  drops are the first 15 to 20 s: 8,923 cache waits that hit 5 s and 5,731 pool acquire timeouts in the replica
+  logs, and no statement timeouts (per replica in `drain-open-4r-coldstart-fixed.txt`). All but 4 page queries had run
+  16 s into the run. From 20 s on the run held 4,900 req/s with 0 to 18 errors per 5 s and p99 of 3 to 21 ms after the 25 s line. During the
+  fill the replicas were pinned at their 1-CPU limit (92 to 98%) while Postgres dropped to 52%, so the fill was then
+  bound by the replicas handling 10,000 in-flight requests, not by Postgres. Postgres had no active query in the first
+  sample after the client exited.
+- **Foreign load.** A short-lived container from another project used up to 69% of a CPU in one sample of the
+  1-replica 300/s run (`stats-open-1r-coldstart-300-fixed.txt`); in the other runs none used more than 1%.
+- **Deviation.** Before these runs the 30 `ver:*` counters in Redis were lost (a test run flushed the database). With no
+  cache entries left, a missing counter reads as version 0, so the cold path is the same code and cost.
+
+Files: `open-{1r-coldstart-300,1r-coldstart-1225,4r-coldstart}-fixed.json`, and `log-`, `stats-`, `drain-` and
+`pgmon-` (active backends and the `products` scan counter every second) files with the same suffixes;
+`health-open-4r-coldstart-fixed.txt`; the first 4-replica attempt as `*-open-4r-coldstart-fixed-attempt1.*`.

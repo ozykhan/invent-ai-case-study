@@ -1,0 +1,35 @@
+2026-09-25T19:17:14Z # cmd: pnpm -s modaco --url http://localhost:8080 load browse --rate 4900/s --duration 60s --warmup 0s --seed 42 --out docs/load-tests/2026-09-25-rerun/open-4r-coldstart-fixed.json
+2026-09-25T19:17:14Z  WARN  Issue while reading "/Users/fco/.npmrc". Failed to replace env in config: ${GITHUB_PACKAGES_TOKEN}
+2026-09-25T19:17:33Z sampled 2000 product ids across 8 categories (catalog total 499479)
+2026-09-25T19:17:33Z phase main: 60s
+2026-09-25T19:17:38Z [main 5.0s] 345 req/s  p50 3209.22ms  p99 4575.23ms  errors 300  dropped 12472  in-flight 10000
+2026-09-25T19:17:43Z [main 10.0s] 1474 req/s  p50 360.7ms  p99 7401.47ms  errors 9419  dropped 7714  in-flight 9999
+2026-09-25T19:17:48Z [main 15.0s] 4441 req/s  p50 148.35ms  p99 7114.75ms  errors 4715  dropped 2986  in-flight 4595
+2026-09-25T19:17:53Z [main 20.0s] 5773 req/s  p50 1.76ms  p99 5545.98ms  errors 210  dropped 0  in-flight 22
+2026-09-25T19:17:58Z [main 25.0s] 4897 req/s  p50 0.91ms  p99 205.82ms  errors 18  dropped 0  in-flight 21
+2026-09-25T19:18:03Z [main 30.0s] 4896 req/s  p50 2.53ms  p99 19.87ms  errors 13  dropped 0  in-flight 29
+2026-09-25T19:18:08Z [main 35.0s] 4900 req/s  p50 0.97ms  p99 6.19ms  errors 16  dropped 0  in-flight 13
+2026-09-25T19:18:13Z [main 40.0s] 4900 req/s  p50 0.91ms  p99 20.8ms  errors 7  dropped 0  in-flight 4
+2026-09-25T19:18:18Z [main 45.0s] 4898 req/s  p50 1.14ms  p99 8.43ms  errors 0  dropped 0  in-flight 13
+2026-09-25T19:18:23Z [main 50.0s] 4902 req/s  p50 0.89ms  p99 18.35ms  errors 0  dropped 0  in-flight 4
+2026-09-25T19:18:28Z [main 55.0s] 4900 req/s  p50 0.81ms  p99 3.36ms  errors 0  dropped 0  in-flight 3
+2026-09-25T19:18:33Z [main 60.0s] 4898 req/s  p50 0.83ms  p99 12.38ms  errors 0  dropped 0  in-flight 13
+2026-09-25T19:18:33Z browse -> http://localhost:8080  model=open rate=4900 rampMs=0 maxInflight=10000 durationMs=60000 warmupMs=0 connections=10000 timeoutMs=10000 seed=42 maxPage=5 maxErrorRate=0
+2026-09-25T19:18:33Z 
+2026-09-25T19:18:33Z phase main (60s), latency in ms
+2026-09-25T19:18:33Z   label   count   req/s   p50   p90     p95      p99      p99.9    max       errors  dropped  status
+2026-09-25T19:18:33Z   total   256131  4268.9  1.05  119.87  1901.57  5378.05  7389.18  10827.14  14698   23172    200:256131 503:14652
+2026-09-25T19:18:33Z   detail  77795   1296.6  0.89  164.35  2529.28  5054.46  7901.18  10827.14  3167    7096     200:77795 503:3131
+2026-09-25T19:18:33Z   list    178336  2972.3  1.09  103.81  1709.06  5591.04  7208.96  10479.82  11531   16076    200:178336 503:11521
+2026-09-25T19:18:33Z   errors: serverError:14652 timeout:46
+2026-09-25T19:18:33Z   warning: 23172 requests dropped at --max-inflight; the target or this client could not keep up with the rate
+2026-09-25T19:18:33Z 
+2026-09-25T19:18:33Z instances (4)
+2026-09-25T19:18:33Z   05bdc9261999  67666  25.0%
+2026-09-25T19:18:33Z   19f86cc958cf  67709  25.0%
+2026-09-25T19:18:33Z   a65ddc7a1fd2  67702  25.0%
+2026-09-25T19:18:33Z   ed72f420a4fc  67706  25.0%
+2026-09-25T19:18:33Z 
+2026-09-25T19:18:33Z checks
+2026-09-25T19:18:33Z   FAIL error rate: 5.43% (14698 of 270829) > --max-error-rate 0.00%
+2026-09-25T19:18:34Z # exit 1

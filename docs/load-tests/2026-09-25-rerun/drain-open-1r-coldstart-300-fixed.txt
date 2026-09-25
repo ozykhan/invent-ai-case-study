@@ -1,0 +1,34 @@
+# after the client exited (2026-09-25T19:12:55Z): active Postgres client backends, polled every 1 s
+2026-09-25T19:12:55Z active=0 modaco-api-postgres-1 2.21%
+2026-09-25T19:12:57Z active=0 modaco-api-postgres-1 2.43%
+2026-09-25T19:13:00Z active=0 modaco-api-postgres-1 2.14%
+2026-09-25T19:13:03Z active=0 modaco-api-postgres-1 1.56%
+2026-09-25T19:13:06Z active=0 modaco-api-postgres-1 3.26%
+2026-09-25T19:13:08Z active=0 modaco-api-postgres-1 2.42%
+2026-09-25T19:13:11Z active=0 modaco-api-postgres-1 4.62%
+2026-09-25T19:13:14Z active=0 modaco-api-postgres-1 1.44%
+2026-09-25T19:13:17Z active=0 modaco-api-postgres-1 2.42%
+2026-09-25T19:13:19Z active=0 modaco-api-postgres-1 2.83%
+2026-09-25T19:13:22Z active=0 modaco-api-postgres-1 3.09%
+2026-09-25T19:13:24Z active=0 modaco-api-postgres-1 0.00%
+2026-09-25T19:13:27Z active=0 modaco-api-postgres-1 2.46%
+2026-09-25T19:13:29Z active=0 modaco-api-postgres-1 2.96%
+2026-09-25T19:13:32Z active=0 modaco-api-postgres-1 3.36%
+2026-09-25T19:13:34Z active=0 modaco-api-postgres-1 2.26%
+2026-09-25T19:13:37Z active=0 modaco-api-postgres-1 1.21%
+2026-09-25T19:13:39Z active=0 modaco-api-postgres-1 2.46%
+2026-09-25T19:13:42Z active=0 modaco-api-postgres-1 2.89%
+2026-09-25T19:13:44Z active=0 modaco-api-postgres-1 3.07%
+2026-09-25T19:13:47Z active=1 modaco-api-postgres-1 2.86%
+2026-09-25T19:13:50Z active=0 modaco-api-postgres-1 3.59%
+2026-09-25T19:13:53Z active=0 modaco-api-postgres-1 2.66%
+2026-09-25T19:13:55Z active=0 modaco-api-postgres-1 2.06%
+2026-09-25T19:13:58Z active=0 modaco-api-postgres-1 0.01%
+2026-09-25T19:14:00Z active=0 modaco-api-postgres-1 3.02%
+2026-09-25T19:14:03Z active=0 modaco-api-postgres-1 3.89%
+2026-09-25T19:14:05Z active=0 modaco-api-postgres-1 4.76%
+2026-09-25T19:14:08Z active=1 modaco-api-postgres-1 0.01%
+2026-09-25T19:14:10Z active=0 modaco-api-postgres-1 2.78%
+# products seq_scan delta (one per cold page query; count uses an index): 168
+# api log: 0 overloaded 503s logged; 0 error-level lines
+# code: commit add1e75; a fresh dev API process (node --import tsx src/server.ts) for this run
