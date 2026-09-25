@@ -24,7 +24,7 @@ Spec: `docs/superpowers/specs/2026-09-24-modaco-promotion-api-design.md`
 - Vendor CSV columns, in order: `sku,name,category,vendor_price,stock`. Header row present. UTF-8. No embedded newlines.
 - Pricing rules order: validate, margin, round up to `.99`, clamp to category floor and ceiling. Default category margin 30%, floor 0.99, ceiling 99999.99.
 - Local infrastructure names: bucket `modaco-vendor-uploads`, queues `modaco-s3-events`, `modaco-ingest-chunks`, `modaco-ingest-dlq`, LocalStack account `000000000000`, region `us-east-1`, credentials `test`/`test`.
-- Postgres local URL `postgres://modaco:modaco@localhost:5432/modaco`, Redis local URL `redis://localhost:6379`.
+- Postgres local URL `postgres://modaco:modaco@localhost:5433/modaco`, Redis local URL `redis://localhost:6379`.
 - All commits end with `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
 - Integration tests need the compose infrastructure running: `docker compose up -d postgres redis localstack`.
 
@@ -209,7 +209,7 @@ tmp/
 `.env.example`:
 ```
 PORT=3000
-DATABASE_URL=postgres://modaco:modaco@localhost:5432/modaco
+DATABASE_URL=postgres://modaco:modaco@localhost:5433/modaco
 REDIS_URL=redis://localhost:6379
 AWS_REGION=us-east-1
 AWS_ACCESS_KEY_ID=test
@@ -238,7 +238,7 @@ services:
       POSTGRES_USER: modaco
       POSTGRES_PASSWORD: modaco
       POSTGRES_DB: modaco
-    ports: ["5432:5432"]
+    ports: ["5433:5432"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U modaco"]
       interval: 3s
@@ -642,7 +642,7 @@ export default defineConfig({
   dialect: 'postgresql',
   schema: './src/db/schema.ts',
   out: './drizzle',
-  dbCredentials: { url: process.env.DATABASE_URL ?? 'postgres://modaco:modaco@localhost:5432/modaco' },
+  dbCredentials: { url: process.env.DATABASE_URL ?? 'postgres://modaco:modaco@localhost:5433/modaco' },
 });
 ```
 
@@ -658,7 +658,7 @@ export type Db = NodePgDatabase<typeof schema>;
 export type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
 export type DbOrTx = Db | Tx;
 
-export const TEST_DATABASE_URL = 'postgres://modaco:modaco@localhost:5432/modaco';
+export const TEST_DATABASE_URL = 'postgres://modaco:modaco@localhost:5433/modaco';
 
 export function createDb(connectionString: string, opts: { max?: number } = {}) {
   const pool = new pg.Pool({ connectionString, max: opts.max ?? 10 });
@@ -1321,7 +1321,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ### Task 5: Cache keys, TTL rule, Redis client, versions, and read-through
 
 **Files:**
-- Create: `packages/core/src/cache/keys.ts`, `packages/core/src/cache/keys.test.ts`, `packages/core/src/cache/redis.ts`, `packages/core/src/cache/versions.ts`, `packages/core/src/cache/read-through.ts`, `packages/core/src/cache/read-through.test.ts`
+- Create: `packages/core/src/cache/keys.ts`, `packages/core/src/cache/keys.test.ts`, `packages/core/src/cache/redis.ts`, `packages/core/src/cache/versions.ts`, `packages/core/src/cache/versions.test.ts`, `packages/core/src/cache/read-through.ts`, `packages/core/src/cache/read-through.test.ts`
 - Modify: `packages/core/src/index.ts`
 
 **Interfaces:**
@@ -1422,6 +1422,7 @@ export function createRedis(url: string): Redis {
     maxRetriesPerRequest: 1,
     enableOfflineQueue: false,
     connectTimeout: 2000,
+    commandTimeout: 300,
     retryStrategy: (times) => Math.min(times * 200, 2000),
   });
 }
@@ -1455,7 +1456,13 @@ export async function bumpVersions(redis: Redis, versionKeys: string[], log: Log
     try {
       const pipe = redis.pipeline();
       for (const k of versionKeys) pipe.incr(k);
-      await pipe.exec();
+      // ioredis resolves pipeline().exec() with [err, result] pairs (or null) instead of
+      // rejecting when a queued command fails, so a dead-connection failure must be surfaced
+      // manually to trigger the retry loop below.
+      const results = await pipe.exec();
+      if (!results) throw new Error('pipeline exec returned null');
+      const failed = results.find(([err]) => err != null);
+      if (failed) throw failed[0];
       return;
     } catch (err) {
       lastErr = err;
@@ -1896,7 +1903,7 @@ import { z } from 'zod';
 
 const schema = z.object({
   PORT: z.coerce.number().default(3000),
-  DATABASE_URL: z.string().default('postgres://modaco:modaco@localhost:5432/modaco'),
+  DATABASE_URL: z.string().default('postgres://modaco:modaco@localhost:5433/modaco'),
   REDIS_URL: z.string().default('redis://localhost:6379'),
   AWS_REGION: z.string().default('us-east-1'),
   AWS_ENDPOINT_URL: z.string().default('http://localhost:4566'),
@@ -1944,6 +1951,14 @@ export class HttpError extends Error {
 export const notFound = (message: string) => new HttpError(404, 'not_found', message);
 export const unprocessable = (message: string, details?: unknown) => new HttpError(422, 'unprocessable', message, details);
 export const conflict = (message: string) => new HttpError(409, 'conflict', message);
+
+// drizzle-orm 0.44 wraps driver errors in DrizzleQueryError; the pg SQLSTATE or
+// errno code lives on `cause`. Check both so raw pg errors keep working.
+export function pgErrorCode(err: unknown): string | undefined {
+  const e = err as { code?: unknown; cause?: { code?: unknown } } | undefined;
+  const code = e?.code ?? e?.cause?.code;
+  return typeof code === 'string' ? code : undefined;
+}
 ```
 
 - [ ] **Step 3: Middleware**
@@ -1996,7 +2011,7 @@ export function input<B = unknown, Q = unknown, P = unknown>(res: Response): { b
 ```ts
 import type { ErrorRequestHandler } from 'express';
 import type { Logger } from '../logger';
-import { HttpError } from '../errors';
+import { HttpError, pgErrorCode } from '../errors';
 
 const DB_UNAVAILABLE = new Set(['ECONNREFUSED', 'ETIMEDOUT', '57P01', '57P02', '57P03', '08006', '08001']);
 
@@ -2007,7 +2022,7 @@ export function errorHandler(logger: Logger): ErrorRequestHandler {
       res.status(err.status).json({ error: { code: err.code, message: err.message, details: err.details } });
       return;
     }
-    const code = (err as { code?: string })?.code;
+    const code = pgErrorCode(err);
     if (code && DB_UNAVAILABLE.has(code)) {
       logger.error({ err, requestId }, 'database unavailable');
       res.status(503).json({ error: { code: 'database_unavailable', message: 'database unavailable' } });
@@ -2217,26 +2232,49 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 **Files:**
 - Create: `apps/api/src/products/schemas.ts`, `apps/api/src/products/stock.ts`, `apps/api/src/products/cached-reads.ts`, `apps/api/src/products/service.ts`, `apps/api/src/products/routes.ts`, `apps/api/test/products.test.ts`
 - Modify: `apps/api/src/app.ts`
+- Modify: `packages/core/src/cache/redis.ts`, `packages/core/src/cache/versions.ts`, `packages/core/src/index.ts` (add `throwOnPipelineError`, see Step 0)
+- Modify (fix round 1, post-review): `packages/core/src/cache/read-through.ts`, `packages/core/src/cache/read-through.test.ts` — `readThrough` gained `extraKeys`/an `isFresh` that can return `{ fresh, extra }`/a builder `cache: false` escape hatch, all backward compatible (see "Fix round 1" note before Step 3).
 
 **Interfaces:**
 - Produces:
+  - `throwOnPipelineError(results: [Error | null, unknown][] | null): void` in `@modaco/core` (throws when ioredis `pipeline().exec()` resolved with a null result or any per-command error)
   - `interface ProductItem extends ProductRecord { stock: number }`
   - `loadStocks(deps, ids: number[]): Promise<Map<number, number>>`
   - `setStock(deps, id: number, stock: number): Promise<void>` (Redis set with `STOCK_TTL_SECONDS`, swallows errors)
   - `resolveCategoryId(deps, slug: string): Promise<number | null>`
-  - `getCachedProduct(deps, id: number): Promise<ProductRecord | null>`
+  - `getCachedProduct(deps, id: number): Promise<{ record: ProductRecord; stock?: number } | null>` (`stock` is only populated on a warm hit, where the freshness check already fetched it live; a miss/bypass leaves it `undefined` and the caller falls back to `loadStocks`)
   - `getCachedProductPage(deps, opts: { categoryId: number | null; sort: SortDir; page: number; pageSize: number }): Promise<{ items: ProductRecord[]; total: number }>`
   - `class ProductService { constructor(deps); getProduct(id): Promise<ProductItem | null>; listProducts(q: { category?: string; sort: 'effective_price' | '-effective_price'; page: number; pageSize: number }): Promise<{ items: ProductItem[]; pagination: { page: number; pageSize: number; total: number } }> }` (throws `notFound` for an unknown category slug)
   - `productRoutes(deps): Router`
 
+**Fix round 1 (post-review):** three issues found after the initial implementation, fixed together because they touch the same code:
+1. **Every product read 500'd when Redis was unreachable** (not just `redis: null`, but a real client whose commands reject). `getCachedProduct`/`getCachedProductPage`'s builders called `getVersions` unguarded; when `readThrough` degrades to its own unconditional bypass build (outside any try/catch it controls), that throw went uncaught. Fix: a `safeVersions` helper wraps every version read in `cached-reads.ts` and never throws; a value built from a failed read is stamped `cache: false` so it's served but never written to the cache.
+2. **Race**: `getCachedProduct` used to read `ver:category` *after* `fetchProductById`; a promotion committing (and bumping that version) in the gap would stamp stale data with the new version and serve it stale for up to the TTL. Fix: a cheap indexed `select category_id from products where id = $1` runs first, so both `ver:product` and `ver:category` are captured strictly before the price-affecting fetch — any bump during or after the fetch now makes the current version newer than what's stamped, which self-heals on the next read instead of serving stale data.
+3. **Round trips**: the warm path took three Redis round trips (GET entry, MGET versions, MGET stock) instead of the spec's two. Fix: `readThrough` gained an `extraKeys` option (keys MGET'd together with the entry on every read attempt) and lets `isFresh` return `{ fresh, extra }` to hand data back to the caller. Product detail now does MGET(`product:{id}`, `ver:product:{id}`) then, inside `isFresh`, MGET(`ver:category:{catId}`, `stock:{id}`) — handing the live stock value back so `ProductService.getProduct` skips its own `loadStocks` call on a warm hit. Lists do MGET(list entry, its version key) then, unchanged, one `loadStocks` MGET for the page's stock keys.
+
+- [ ] **Step 0: Pipeline error helper in core**
+
+ioredis resolves `pipeline().exec()` with `[err, result]` pairs (or `null`) instead of rejecting, so `.catch` alone never sees per-command failures. Add to `packages/core/src/cache/redis.ts` and export it from `packages/core/src/index.ts` if `redis.ts` exports are not already re-exported wholesale:
+```ts
+/** ioredis resolves pipeline().exec() instead of rejecting; surface a null result or any per-command error. */
+export function throwOnPipelineError(results: [Error | null, unknown][] | null): void {
+  if (!results) throw new Error('pipeline exec returned null');
+  const failed = results.find(([err]) => err != null);
+  if (failed) throw failed[0];
+}
+```
+Refactor `bumpVersions` in `packages/core/src/cache/versions.ts` to call `throwOnPipelineError(await pipe.exec())` in place of its inline check (behavior unchanged; `versions.test.ts` must still pass). Add a unit test in `packages/core/src/cache/redis.test.ts`: null throws, an error pair throws that error, all-success pairs return.
+
 - [ ] **Step 1: Write the failing product read tests**
 
-`apps/api/test/products.test.ts`:
+`apps/api/test/products.test.ts` (final version, including the fix-round-1 tests appended after Step 5's initial 9):
 ```ts
-import { keys } from '@modaco/core';
+import { createRedis, keys } from '@modaco/core';
 import { promotions } from '@modaco/core';
+import type { Express } from 'express';
 import request from 'supertest';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createApp } from '../src/app';
 import { setupTestDeps, type TestContext } from './helpers';
 
 let ctx: TestContext;
@@ -2307,6 +2345,19 @@ describe('GET /products/:id', () => {
     expect(res.status).toBe(200);
     expect(res.body.stock).toBe(3);
   });
+
+  it('warm reads take exactly two redis round trips: entry+productVersion, then categoryVersion+stock', async () => {
+    await request(ctx.app).get(`/products/${belt.id}`); // cold: builds and caches the entry, backfills stock:{id}
+    const mgetSpy = vi.spyOn(ctx.redis, 'mget');
+    const getSpy = vi.spyOn(ctx.redis, 'get');
+    const res = await request(ctx.app).get(`/products/${belt.id}`);
+    expect(res.status).toBe(200);
+    expect(res.body.stock).toBe(3);
+    expect(getSpy).not.toHaveBeenCalled();
+    expect(mgetSpy).toHaveBeenCalledTimes(2);
+    mgetSpy.mockRestore();
+    getSpy.mockRestore();
+  });
 });
 
 describe('GET /products', () => {
@@ -2338,6 +2389,52 @@ describe('GET /products', () => {
     await ctx.redis.incr(keys.categoryVersion(acc.id));
     const after = await request(ctx.app).get('/products?category=accessories');
     expect(after.body.items.map((i: { effectivePrice: string }) => i.effectivePrice)).toEqual(['5.00', '10.00']);
+  });
+
+  it('warm reads take exactly two redis round trips: entry+version, then stock', async () => {
+    await request(ctx.app).get('/products'); // cold: builds and caches the page, backfills stock counters
+    const mgetSpy = vi.spyOn(ctx.redis, 'mget');
+    const getSpy = vi.spyOn(ctx.redis, 'get');
+    const res = await request(ctx.app).get('/products');
+    expect(res.status).toBe(200);
+    expect(res.body.pagination.total).toBe(3);
+    expect(getSpy).not.toHaveBeenCalled();
+    expect(mgetSpy).toHaveBeenCalledTimes(2);
+    mgetSpy.mockRestore();
+    getSpy.mockRestore();
+  });
+});
+
+describe('when redis is unreachable', () => {
+  let dead: ReturnType<typeof createRedis>;
+  let deadApp: Express;
+
+  beforeAll(() => {
+    dead = createRedis('redis://localhost:1');
+    dead.on('error', () => {}); // ioredis emits 'error' events; unhandled ones would throw
+    deadApp = createApp({ ...ctx.deps, redis: dead });
+  });
+  afterAll(() => dead.disconnect());
+
+  it('GET /products/:id still returns 200 with live price and stock from postgres', async () => {
+    const res = await request(deadApp).get(`/products/${belt.id}`);
+    expect(res.status).toBe(200);
+    expect(res.body.effectivePrice).toBe('20.00');
+    expect(res.body.stock).toBe(3);
+  });
+
+  it('GET /products still returns 200 with the full unfiltered page from postgres', async () => {
+    const res = await request(deadApp).get('/products');
+    expect(res.status).toBe(200);
+    expect(res.body.pagination.total).toBe(3);
+    expect(res.body.items.every((i: { stock: number }) => typeof i.stock === 'number')).toBe(true);
+  });
+
+  it('GET /products?category=... still returns 200 with the filtered, priced, stocked page from postgres', async () => {
+    const res = await request(deadApp).get('/products?category=accessories');
+    expect(res.status).toBe(200);
+    expect(res.body.items.map((i: { sku: string }) => i.sku)).toEqual(['HAT', 'BELT']);
+    expect(res.body.items.map((i: { stock: number }) => i.stock)).toEqual([0, 3]);
   });
 });
 ```
@@ -2381,7 +2478,7 @@ export type StockBody = z.infer<typeof stockBody>;
 
 `apps/api/src/products/stock.ts`:
 ```ts
-import { fetchStock, keys, STOCK_TTL_SECONDS } from '@modaco/core';
+import { fetchStock, keys, STOCK_TTL_SECONDS, throwOnPipelineError } from '@modaco/core';
 import type { AppDeps } from '../deps';
 
 /** Redis counters first, Postgres for misses, counters backfilled. Redis failure means Postgres only. */
@@ -2408,7 +2505,7 @@ export async function loadStocks(deps: AppDeps, ids: number[]): Promise<Map<numb
     if (deps.redis && fromDb.size > 0) {
       const pipe = deps.redis.pipeline();
       for (const [id, stock] of fromDb) pipe.set(keys.stock(id), String(stock), 'EX', STOCK_TTL_SECONDS);
-      await pipe.exec().catch((err) => deps.logger.warn({ err }, 'stock backfill failed'));
+      await pipe.exec().then(throwOnPipelineError).catch((err) => deps.logger.warn({ err }, 'stock backfill failed'));
     }
   }
   return out;
@@ -2421,19 +2518,43 @@ export async function setStock(deps: AppDeps, id: number, stock: number): Promis
 }
 ```
 
-`apps/api/src/products/cached-reads.ts`:
+Fix round 1 first extends `readThrough` itself (`packages/core/src/cache/read-through.ts`), in backward-compatible ways (all existing callers and tests keep working unchanged):
+- `BuildResult<T>` gains an optional `cache?: boolean` (default `true`); when the builder returns `cache: false`, the built value is still served but never written to Redis.
+- `ReadThroughOptions` gains `extraKeys?: string[]`: keys MGET'd together with the entry key on every read attempt (initial check and each poll retry), so a version check doesn't need a round trip of its own.
+- `isFresh` now receives a second argument, the raw `(string | null | undefined)[]` values of `extraKeys`, and may return either a plain `boolean` (unchanged) or `{ fresh: boolean; extra?: E }`; `extra` is handed back to the caller on `CacheOutcome.extra`, letting `isFresh` fetch something else (e.g. a live stock counter) in its own round trip and pass it upstream instead of making the caller fetch it again.
+
+`apps/api/src/products/cached-reads.ts` (final version, after fix round 1):
 ```ts
 import { eq } from 'drizzle-orm';
 import {
-  categories, fetchProductById, fetchProductPage, getVersions, keys, nextPromotionBoundary, readThrough,
-  SLUG_TTL_SECONDS, ttlSeconds, type ProductRecord, type SortDir,
+  categories, fetchProductById, fetchProductPage, getVersions, keys, nextPromotionBoundary, parseVersion, products,
+  readThrough, SLUG_TTL_SECONDS, ttlSeconds, type ProductRecord, type Redis, type SortDir,
 } from '@modaco/core';
 import type { AppDeps } from '../deps';
 
 interface ProductEntry { productVersion: number; categoryVersion: number; categoryId: number; record: ProductRecord }
 interface PageEntry { version: number; items: ProductRecord[]; total: number }
 
+export interface CachedProduct { record: ProductRecord; stock?: number }
+
 const onError = (deps: AppDeps) => (err: unknown) => deps.logger.warn({ err }, 'cache degraded; serving from postgres');
+
+/**
+ * Version reads must never throw, and a value built from a version read that failed must never be
+ * cached: a dead Redis client rejects the command outright (not just times out on a GET), and that
+ * happens inside the builder itself — which readThrough calls both from the lock-holder path and,
+ * unconditionally, from its own bypass fallback (outside any try/catch it controls) — so the
+ * failure has to be swallowed here rather than relying on readThrough's error handling.
+ */
+async function safeVersions(deps: AppDeps, redis: Redis | null, versionKeys: string[]): Promise<{ versions: number[]; ok: boolean }> {
+  if (!redis) return { versions: versionKeys.map(() => 0), ok: true };
+  try {
+    return { versions: await getVersions(redis, versionKeys), ok: true };
+  } catch (err) {
+    deps.logger.warn({ err }, 'version read failed while building cache entry; serving uncached');
+    return { versions: versionKeys.map(() => 0), ok: false };
+  }
+}
 
 export async function resolveCategoryId(deps: AppDeps, slug: string): Promise<number | null> {
   const { value } = await readThrough<number | null>(deps.redis, keys.categorySlug(slug), async () => {
@@ -2443,28 +2564,56 @@ export async function resolveCategoryId(deps: AppDeps, slug: string): Promise<nu
   return value;
 }
 
-export async function getCachedProduct(deps: AppDeps, id: number): Promise<ProductRecord | null> {
+export async function getCachedProduct(deps: AppDeps, id: number): Promise<CachedProduct | null> {
   const redis = deps.redis;
-  const { value } = await readThrough<ProductEntry | null>(redis, keys.product(id), async () => {
+  const { value, extra } = await readThrough<ProductEntry | null, number>(redis, keys.product(id), async () => {
     const now = deps.now();
-    const [productVersion] = redis ? await getVersions(redis, [keys.productVersion(id)]) : [0];
+    // The category id must be captured, and its version read, BEFORE the price-affecting fetch
+    // below: if we read the category version only after fetching, a promotion that commits (and
+    // bumps ver:category) in the gap between the fetch and that read would stamp data computed
+    // under the OLD promotion state with the NEW version number, and the entry would then read as
+    // fresh — serving stale prices for the rest of the TTL. Reading it first means any bump during
+    // or after the fetch makes the current version strictly newer than what's stamped, so isFresh
+    // correctly rejects it on the next read instead. The lookup is a cheap indexed PK read.
+    const [catRow] = await deps.db.select({ categoryId: products.categoryId }).from(products).where(eq(products.id, id));
+    if (!catRow) return { value: null, ttlSeconds: 5 };
+    const { versions, ok } = await safeVersions(deps, redis, [keys.productVersion(id), keys.categoryVersion(catRow.categoryId)]);
+    const [productVersion, categoryVersion] = versions;
     const record = await fetchProductById(deps.db, id, now);
     if (!record) return { value: null, ttlSeconds: 5 };
-    const [categoryVersion] = redis ? await getVersions(redis, [keys.categoryVersion(record.category.id)]) : [0];
+    // Defensive: if the product's category itself changed between the lookup above and this
+    // fetch (a rare admin operation, not a promotion bump), the version we captured belongs to
+    // the wrong category — don't cache that mismatch.
+    const categoryChanged = record.category.id !== catRow.categoryId;
     const boundary = await nextPromotionBoundary(deps.db, { productId: id, categoryId: record.category.id }, now);
     return {
       value: { productVersion: productVersion ?? 0, categoryVersion: categoryVersion ?? 0, categoryId: record.category.id, record },
       ttlSeconds: ttlSeconds(now, boundary),
+      cache: ok && !categoryChanged,
     };
   }, {
     onError: onError(deps),
-    isFresh: async (entry) => {
+    // Round trip 1 (on a hit): MGET(product:{id}, ver:product:{id}) — the entry and its own
+    // version together, so checking productVersion doesn't need a separate read.
+    extraKeys: [keys.productVersion(id)],
+    isFresh: async (entry, extraRaw) => {
       if (!entry || !redis) return true;
-      const [pv, cv] = await getVersions(redis, [keys.productVersion(id), keys.categoryVersion(entry.categoryId)]);
-      return entry.productVersion === pv && entry.categoryVersion === cv;
+      if (entry.productVersion !== parseVersion(extraRaw[0])) return false;
+      try {
+        // Round trip 2 (on a hit): MGET(ver:category:{catId}, stock:{id}) — the category version
+        // needed to confirm freshness (only known once the entry is parsed) bundled with the live
+        // stock counter, so the service can skip its own stock lookup on this path.
+        const [cvRaw, stockRaw] = await redis.mget(keys.categoryVersion(entry.categoryId), keys.stock(id));
+        if (entry.categoryVersion !== parseVersion(cvRaw)) return false;
+        return { fresh: true, extra: stockRaw == null ? undefined : Number(stockRaw) };
+      } catch (err) {
+        onError(deps)(err);
+        return false;
+      }
     },
   });
-  return value?.record ?? null;
+  if (!value) return null;
+  return { record: value.record, stock: extra };
 }
 
 export async function getCachedProductPage(
@@ -2475,19 +2624,20 @@ export async function getCachedProductPage(
   const versionKey = opts.categoryId === null ? keys.allVersion() : keys.categoryVersion(opts.categoryId);
   const { value } = await readThrough<PageEntry>(redis, keys.list(opts.categoryId, opts.sort, opts.page, opts.pageSize), async () => {
     const now = deps.now();
-    const [version] = redis ? await getVersions(redis, [versionKey]) : [0];
+    const { versions: [version], ok } = await safeVersions(deps, redis, [versionKey]);
     const page = await fetchProductPage(deps.db, {
       categoryId: opts.categoryId, sort: opts.sort, limit: opts.pageSize, offset: (opts.page - 1) * opts.pageSize, now,
     });
     const boundary = await nextPromotionBoundary(deps.db, { categoryId: opts.categoryId }, now);
-    return { value: { version: version ?? 0, ...page }, ttlSeconds: ttlSeconds(now, boundary) };
+    return { value: { version: version ?? 0, ...page }, ttlSeconds: ttlSeconds(now, boundary), cache: ok };
   }, {
     onError: onError(deps),
-    isFresh: async (entry) => {
-      if (!redis) return true;
-      const [v] = await getVersions(redis, [versionKey]);
-      return entry.version === v;
-    },
+    // Round trip 1 (on a hit): MGET(list entry, its version key) — the version key is known
+    // upfront (it only depends on the query's category, not on the fetched page), so it's bundled
+    // with the entry read. Stock is fetched separately by the caller once item ids are known
+    // (round trip 2), same as the cold-path fetch.
+    extraKeys: [versionKey],
+    isFresh: async (entry, extraRaw) => entry.version === parseVersion(extraRaw[0]),
   });
   return { items: value.items, total: value.total };
 }
@@ -2510,10 +2660,13 @@ export class ProductService {
   constructor(private readonly deps: AppDeps) {}
 
   async getProduct(id: number): Promise<ProductItem | null> {
-    const record = await getCachedProduct(this.deps, id);
-    if (!record) return null;
+    const cached = await getCachedProduct(this.deps, id);
+    if (!cached) return null;
+    // A warm cache hit already carries the live stock counter (fetched in the same round trip as
+    // the category-version freshness check); only fall back to a separate lookup when it doesn't.
+    if (cached.stock !== undefined) return { ...cached.record, stock: cached.stock };
     const stocks = await loadStocks(this.deps, [id]);
-    return { ...record, stock: stocks.get(id) ?? 0 };
+    return { ...cached.record, stock: stocks.get(id) ?? 0 };
   }
 
   async listProducts(q: ListQuery): Promise<{ items: ProductItem[]; pagination: { page: number; pageSize: number; total: number } }> {
@@ -2567,7 +2720,7 @@ Modify `apps/api/src/app.ts`: import `productRoutes` and add `app.use(productRou
 - [ ] **Step 5: Run tests**
 
 Run: `pnpm --filter @modaco/api test test/products.test.ts`
-Expected: PASS, 9 tests.
+Expected: PASS, 9 tests. (After fix round 1: PASS, 14 tests — 5 more added covering the redis-unreachable and round-trip-count fixes above.)
 
 - [ ] **Step 6: Commit**
 
@@ -2633,7 +2786,7 @@ Expected: the four new tests FAIL with 404.
 
 - [ ] **Step 3: Extend the service**
 
-Add to `apps/api/src/products/service.ts` (imports: `eq`, `sql` from `drizzle-orm`; `categories`, `products`, `bumpCategory`, `bumpProduct` from `@modaco/core`; `conflict`, `unprocessable` from `../errors`; `setStock` from `./stock`; `CreateProductBody`, `StockBody` from `./schemas`):
+Add to `apps/api/src/products/service.ts` (imports: `eq`, `sql` from `drizzle-orm`; `categories`, `products`, `bumpCategory`, `bumpProduct` from `@modaco/core`; `conflict`, `unprocessable`, `pgErrorCode` from `../errors`; `setStock` from `./stock`; `CreateProductBody`, `StockBody` from `./schemas`):
 ```ts
   async createProduct(body: CreateProductBody): Promise<ProductItem> {
     const [cat] = await this.deps.db.select({ id: categories.id }).from(categories).where(eq(categories.id, body.categoryId));
@@ -2645,7 +2798,7 @@ Add to `apps/api/src/products/service.ts` (imports: `eq`, `sql` from `drizzle-or
       }).returning({ id: products.id });
       id = row!.id;
     } catch (err) {
-      if ((err as { code?: string }).code === '23505') throw conflict(`sku '${body.sku}' already exists`);
+      if (pgErrorCode(err) === '23505') throw conflict(`sku '${body.sku}' already exists`);
       throw err;
     }
     if (this.deps.redis) {
@@ -2665,7 +2818,7 @@ Add to `apps/api/src/products/service.ts` (imports: `eq`, `sql` from `drizzle-or
     try {
       [row] = await this.deps.db.update(products).set(set).where(eq(products.id, id)).returning({ id: products.id, stock: products.stock });
     } catch (err) {
-      if ((err as { code?: string }).code === '23514') throw unprocessable('stock cannot go below zero');
+      if (pgErrorCode(err) === '23514') throw unprocessable('stock cannot go below zero');
       throw err;
     }
     await setStock(this.deps, id, row!.stock);
@@ -2709,8 +2862,10 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ### Task 10: Promotion endpoints
 
 **Files:**
-- Create: `apps/api/src/promotions/schemas.ts`, `apps/api/src/promotions/service.ts`, `apps/api/src/promotions/routes.ts`, `apps/api/test/promotions.test.ts`
-- Modify: `apps/api/src/app.ts`
+- Create: `apps/api/src/promotions/schemas.ts`, `apps/api/src/promotions/service.ts`, `apps/api/src/promotions/routes.ts`, `apps/api/test/promotions.test.ts`, `apps/api/src/schemas.ts` (shared `moneyString` zod schema)
+- Modify: `apps/api/src/app.ts`, `apps/api/src/products/schemas.ts` (switch `basePrice` to the shared `moneyString`)
+
+**Fix round 1 (post-review):** cancel was read-then-write, letting two concurrent cancels both bump; fixed with a single conditional `UPDATE ... WHERE cancelled_at is null` (compare-and-set), bumping only when a row comes back. assign (`PUT /:id/target`) was also read-then-write, letting concurrent moves both read the same stale "old" target and lose a bump; fixed with `db.transaction` + `SELECT ... FOR UPDATE` to lock the row while capturing the old target, updating inside the transaction, and bumping both old and new targets only after it commits. The `value`/`basePrice` money regex allowed unlimited integer digits against a `numeric(12,2)` column (pg 22003 -> 500 on overflow); capped at 10 integer digits via a shared `moneyString` schema in `apps/api/src/schemas.ts`, used by both `products/schemas.ts` and `promotions/schemas.ts`. The product-scoped bump also ran a DB query after the insert commits (retry-unsafe alongside a duplicate-insert risk); `resolveTarget` now returns the product's category id from the pre-write validation query, so `bump()` never queries after a write it must be safe to retry.
 
 **Interfaces:**
 - Produces:
@@ -2762,12 +2917,17 @@ describe('POST /promotions', () => {
     expect(await ctx.redis.get(keys.allVersion())).toBe('1');
   });
 
-  it('creates a product promotion and bumps only the product version', async () => {
+  it('creates a product promotion and bumps the product, its category, and all', async () => {
+    const warm = await request(ctx.app).get('/products?category=accessories');
+    expect(warm.body.items.find((i: { id: number }) => i.id === belt.id).effectivePrice).toBe('20.00');
     const res = await request(ctx.app).post('/promotions').send(body({ target: { productId: belt.id }, discountType: 'fixed', value: '5.00' }));
     expect(res.status).toBe(201);
     expect((await request(ctx.app).get(`/products/${belt.id}`)).body.effectivePrice).toBe('15.00');
     expect(await ctx.redis.get(keys.productVersion(belt.id))).toBe('1');
-    expect(await ctx.redis.get(keys.categoryVersion(acc.id))).toBeNull();
+    expect(await ctx.redis.get(keys.categoryVersion(acc.id))).toBe('1');
+    expect(await ctx.redis.get(keys.allVersion())).toBe('1');
+    const list = await request(ctx.app).get('/products?category=accessories');
+    expect(list.body.items.find((i: { id: number }) => i.id === belt.id).effectivePrice).toBe('15.00');
   });
 
   it('most recent promotion wins', async () => {
@@ -2782,6 +2942,7 @@ describe('POST /promotions', () => {
     expect((await request(ctx.app).post('/promotions').send(body({ target: { categoryId: 9999 } }))).status).toBe(404);
     expect((await request(ctx.app).post('/promotions').send(body({ target: {} }))).status).toBe(400);
     expect((await request(ctx.app).post('/promotions').send(body({ value: 'abc' }))).status).toBe(400);
+    expect((await request(ctx.app).post('/promotions').send(body({ value: '12345678901' }))).status).toBe(400); // 11 integer digits
   });
 });
 
@@ -2796,6 +2957,31 @@ describe('POST /promotions/:id/cancel', () => {
     expect(second.body.cancelledAt).toBe(first.body.cancelledAt);
     expect((await request(ctx.app).get(`/products/${belt.id}`)).body.effectivePrice).toBe('20.00');
     expect((await request(ctx.app).post('/promotions/00000000-0000-0000-0000-000000000000/cancel')).status).toBe(404);
+  });
+
+  it('a second cancel does not bump the category or all versions again', async () => {
+    const { body: promo } = await request(ctx.app).post('/promotions').send(body());
+    const afterCreate = { cat: await ctx.redis.get(keys.categoryVersion(acc.id)), all: await ctx.redis.get(keys.allVersion()) };
+    await request(ctx.app).post(`/promotions/${promo.id}/cancel`);
+    const afterFirst = { cat: await ctx.redis.get(keys.categoryVersion(acc.id)), all: await ctx.redis.get(keys.allVersion()) };
+    expect(afterFirst).not.toEqual(afterCreate);
+    await request(ctx.app).post(`/promotions/${promo.id}/cancel`);
+    const afterSecond = { cat: await ctx.redis.get(keys.categoryVersion(acc.id)), all: await ctx.redis.get(keys.allVersion()) };
+    expect(afterSecond).toEqual(afterFirst);
+  });
+
+  it('two concurrent cancels bump exactly once', async () => {
+    const { body: promo } = await request(ctx.app).post('/promotions').send(body());
+    const before = Number(await ctx.redis.get(keys.categoryVersion(acc.id)));
+    const [r1, r2] = await Promise.all([
+      request(ctx.app).post(`/promotions/${promo.id}/cancel`),
+      request(ctx.app).post(`/promotions/${promo.id}/cancel`),
+    ]);
+    expect(r1.status).toBe(200);
+    expect(r2.status).toBe(200);
+    expect(r1.body.cancelledAt).toBe(r2.body.cancelledAt);
+    const after = Number(await ctx.redis.get(keys.categoryVersion(acc.id)));
+    expect(after).toBe(before + 1);
   });
 });
 
@@ -2813,6 +2999,13 @@ describe('PUT /promotions/:id/target', () => {
     expect((await request(ctx.app).get(`/products/${boot.id}`)).body.effectivePrice).toBe('100.00');
     expect((await request(ctx.app).get(`/products/${belt.id}`)).body.effectivePrice).toBe('10.00');
   });
+
+  it('404s for an unknown promotion and an unknown target, 400s for an invalid body', async () => {
+    const { body: promo } = await request(ctx.app).post('/promotions').send(body());
+    expect((await request(ctx.app).put('/promotions/00000000-0000-0000-0000-000000000000/target').send({ categoryId: shoes.id })).status).toBe(404);
+    expect((await request(ctx.app).put(`/promotions/${promo.id}/target`).send({ categoryId: 9999 })).status).toBe(404);
+    expect((await request(ctx.app).put(`/promotions/${promo.id}/target`).send({})).status).toBe(400);
+  });
 });
 
 describe('GET /promotions/:id', () => {
@@ -2820,6 +3013,7 @@ describe('GET /promotions/:id', () => {
     const { body: promo } = await request(ctx.app).post('/promotions').send(body());
     expect((await request(ctx.app).get(`/promotions/${promo.id}`)).body.id).toBe(promo.id);
     expect((await request(ctx.app).get('/promotions/not-a-uuid')).status).toBe(400);
+    expect((await request(ctx.app).get('/promotions/00000000-0000-0000-0000-000000000000')).status).toBe(404);
   });
 });
 ```
@@ -2831,9 +3025,24 @@ Expected: FAIL with 404s.
 
 - [ ] **Step 3: Implement schemas and service**
 
+`apps/api/src/schemas.ts` (shared across `products` and `promotions`):
+```ts
+import { z } from 'zod';
+
+/**
+ * A monetary amount as sent/received in JSON: a decimal string with up to 2 places, capped at
+ * 10 integer digits so it always fits a `numeric(12,2)` column (12 total digits, 2 reserved for
+ * the fraction) — an unbounded integer part would otherwise let a huge value hit Postgres error
+ * 22003 (numeric field overflow) and surface as a 500 instead of a validation error.
+ */
+export const moneyString = (label: string) =>
+  z.string().regex(/^\d{1,10}(\.\d{1,2})?$/, `${label} must be a decimal with up to 2 places and at most 10 integer digits`);
+```
+
 `apps/api/src/promotions/schemas.ts`:
 ```ts
 import { z } from 'zod';
+import { moneyString } from '../schemas';
 
 export const promotionIdParam = z.object({ id: z.string().uuid() });
 
@@ -2846,7 +3055,7 @@ export type Target = z.infer<typeof targetSchema>;
 export const createPromotionBody = z.object({
   name: z.string().trim().min(1).max(255),
   discountType: z.enum(['percentage', 'fixed']),
-  value: z.string().regex(/^\d+(\.\d{1,2})?$/, 'value must be a decimal with up to 2 places'),
+  value: moneyString('value'),
   startsAt: z.string().datetime({ offset: true }),
   endsAt: z.string().datetime({ offset: true }),
   target: targetSchema,
@@ -2854,10 +3063,12 @@ export const createPromotionBody = z.object({
 export type CreatePromotionBody = z.infer<typeof createPromotionBody>;
 ```
 
+`apps/api/src/products/schemas.ts` now imports the same `moneyString('basePrice')` in place of its own inline regex (unlimited-digit money strings hit the same pg 22003 overflow).
+
 `apps/api/src/promotions/service.ts`:
 ```ts
-import { eq } from 'drizzle-orm';
-import { bumpCategory, bumpProduct, categories, products, promotions, type Redis } from '@modaco/core';
+import { and, eq, isNull } from 'drizzle-orm';
+import { bumpCategory, bumpVersions, categories, keys, products, promotions, type DbOrTx, type Redis } from '@modaco/core';
 import type { AppDeps } from '../deps';
 import { notFound, unprocessable } from '../errors';
 import type { CreatePromotionBody, Target } from './schemas';
@@ -2882,22 +3093,38 @@ function toView(r: Row): PromotionView {
 export class PromotionService {
   constructor(private readonly deps: AppDeps) {}
 
-  private async assertTarget(target: Target): Promise<void> {
+  /**
+   * Validates the target exists and, for a product target, returns its category id — so callers
+   * that already need to touch the target row (create, assign) can pass that id straight to
+   * bump() instead of re-querying it after the write commits.
+   */
+  private async resolveTarget(db: DbOrTx, target: Target): Promise<number | undefined> {
     if ('productId' in target) {
-      const [p] = await this.deps.db.select({ id: products.id }).from(products).where(eq(products.id, target.productId));
+      const [p] = await db.select({ categoryId: products.categoryId }).from(products).where(eq(products.id, target.productId));
       if (!p) throw notFound(`product ${target.productId} not found`);
-    } else {
-      const [c] = await this.deps.db.select({ id: categories.id }).from(categories).where(eq(categories.id, target.categoryId));
-      if (!c) throw notFound(`category ${target.categoryId} not found`);
+      return p.categoryId;
     }
+    const [c] = await db.select({ id: categories.id }).from(categories).where(eq(categories.id, target.categoryId));
+    if (!c) throw notFound(`category ${target.categoryId} not found`);
+    return undefined;
   }
 
-  private async bump(target: Target): Promise<void> {
+  /** productCategoryId must be supplied by the caller for a product target; bump() never queries. */
+  private async bump(target: Target, productCategoryId?: number): Promise<void> {
     const redis: Redis | null = this.deps.redis;
     if (!redis) return;
     const log = (msg: string, err: unknown) => this.deps.logger.error({ err }, msg);
-    if ('productId' in target) await bumpProduct(redis, target.productId, log);
-    else await bumpCategory(redis, target.categoryId, log);
+    if ('productId' in target) {
+      // A product-scoped promo changes that product's price and its position in category and
+      // all-products lists, so bump the product's category (and ver:all) as well.
+      await bumpVersions(redis, [
+        keys.productVersion(target.productId),
+        ...(productCategoryId !== undefined ? [keys.categoryVersion(productCategoryId)] : []),
+        keys.allVersion(),
+      ], log);
+    } else {
+      await bumpCategory(redis, target.categoryId, log);
+    }
   }
 
   async create(body: CreatePromotionBody): Promise<PromotionView> {
@@ -2905,14 +3132,16 @@ export class PromotionService {
     const endsAt = new Date(body.endsAt);
     if (endsAt <= startsAt) throw unprocessable('endsAt must be after startsAt');
     if (body.discountType === 'percentage' && Number(body.value) > 100) throw unprocessable('percentage value cannot exceed 100');
-    await this.assertTarget(body.target);
+    // Resolves the target and, for a product, its category id in one query, before the insert —
+    // so the write commits are followed only by the bump, never by another read.
+    const productCategoryId = await this.resolveTarget(this.deps.db, body.target);
     const [row] = await this.deps.db.insert(promotions).values({
       name: body.name, discountType: body.discountType, value: body.value, startsAt, endsAt,
       scope: 'productId' in body.target ? 'product' : 'category',
       productId: 'productId' in body.target ? body.target.productId : null,
       categoryId: 'categoryId' in body.target ? body.target.categoryId : null,
     }).returning();
-    await this.bump(body.target);
+    await this.bump(body.target, productCategoryId);
     return toView(row!);
   }
 
@@ -2922,26 +3151,55 @@ export class PromotionService {
   }
 
   async cancel(id: string): Promise<PromotionView | null> {
+    // A single conditional UPDATE, guarded by `cancelled_at is null`, makes this compare-and-set:
+    // of two concurrent cancels, Postgres row-level locking lets exactly one UPDATE actually flip
+    // cancelled_at and return a row: the other's WHERE clause no longer matches, so it returns none.
+    const [row] = await this.deps.db.update(promotions)
+      .set({ cancelledAt: this.deps.now() })
+      .where(and(eq(promotions.id, id), isNull(promotions.cancelledAt)))
+      .returning();
+    if (row) {
+      const view = toView(row);
+      // Only the winner of the race reaches here, so this runs at most once per actual
+      // cancellation. It's a query after the commit, but unlike create()'s insert this is safe to
+      // retry: a second cancel() call is a no-op (the guard above returns no row for it), so a
+      // failure here just leaves the category cache stale until its TTL — the same self-heal
+      // bumpVersions already relies on for a failed bump.
+      const productCategoryId = 'productId' in view.target
+        ? (await this.deps.db.select({ categoryId: products.categoryId }).from(products).where(eq(products.id, view.target.productId)))[0]?.categoryId
+        : undefined;
+      await this.bump(view.target, productCategoryId);
+      return view;
+    }
     const [existing] = await this.deps.db.select().from(promotions).where(eq(promotions.id, id));
-    if (!existing) return null;
-    if (existing.cancelledAt) return toView(existing);
-    const [row] = await this.deps.db.update(promotions).set({ cancelledAt: this.deps.now() }).where(eq(promotions.id, id)).returning();
-    await this.bump(toView(row!).target);
-    return toView(row!);
+    return existing ? toView(existing) : null;
   }
 
   async assign(id: string, target: Target): Promise<PromotionView | null> {
-    const [existing] = await this.deps.db.select().from(promotions).where(eq(promotions.id, id));
-    if (!existing) return null;
-    await this.assertTarget(target);
-    const [row] = await this.deps.db.update(promotions).set({
-      scope: 'productId' in target ? 'product' : 'category',
-      productId: 'productId' in target ? target.productId : null,
-      categoryId: 'categoryId' in target ? target.categoryId : null,
-    }).where(eq(promotions.id, id)).returning();
-    await this.bump(toView(existing).target);
-    await this.bump(target);
-    return toView(row!);
+    const result = await this.deps.db.transaction(async (tx) => {
+      // Lock the row so a concurrent assign can't read the same stale "old" target: with
+      // concurrent moves X->Y and X->Z, whichever transaction commits second must see the first
+      // transaction's write as its own "old" target, not the original X, or Y would never be
+      // invalidated. FOR UPDATE plus the transaction serializes the two around that read.
+      const [existing] = await tx.select().from(promotions).where(eq(promotions.id, id)).for('update');
+      if (!existing) return null;
+      const oldTarget = toView(existing).target;
+      const oldCategoryId = 'productId' in oldTarget
+        ? (await tx.select({ categoryId: products.categoryId }).from(products).where(eq(products.id, oldTarget.productId)))[0]?.categoryId
+        : undefined;
+      const newCategoryId = await this.resolveTarget(tx, target);
+      const [row] = await tx.update(promotions).set({
+        scope: 'productId' in target ? 'product' : 'category',
+        productId: 'productId' in target ? target.productId : null,
+        categoryId: 'categoryId' in target ? target.categoryId : null,
+      }).where(eq(promotions.id, id)).returning();
+      return { row: row!, oldTarget, oldCategoryId, newCategoryId };
+    });
+    if (!result) return null;
+    // Bumps happen after the transaction has committed, never inside it.
+    await this.bump(result.oldTarget, result.oldCategoryId);
+    await this.bump(target, result.newCategoryId);
+    return toView(result.row);
   }
 }
 ```
@@ -3259,7 +3517,7 @@ export default defineConfig({ test: { include: ['test/**/*.test.ts'], testTimeou
 import { z } from 'zod';
 
 const schema = z.object({
-  DATABASE_URL: z.string().default('postgres://modaco:modaco@localhost:5432/modaco'),
+  DATABASE_URL: z.string().default('postgres://modaco:modaco@localhost:5433/modaco'),
   REDIS_URL: z.string().default('redis://localhost:6379'),
   AWS_REGION: z.string().default('us-east-1'),
   AWS_ENDPOINT_URL: z.string().optional(),
@@ -3399,7 +3657,7 @@ export async function setupIngestTest(env: Record<string, string> = {}): Promise
       }
       return out;
     },
-    putObject: async (key, body) => { await real.s3.send(new PutObjectCommand({ Bucket: config.s3Bucket, Key: key, Body: body })); },
+    putObject: async (key, body) => { await real.s3.send(new PutObjectCommand({ Bucket: config.s3Bucket, Key: key, Body: body, ContentLength: Buffer.byteLength(body) })); },
     createJob: async (key) => {
       const [job] = await real.db.insert(ingestionJobs).values({ s3Key: key }).returning({ id: ingestionJobs.id });
       return job!.id;
@@ -3408,6 +3666,8 @@ export async function setupIngestTest(env: Record<string, string> = {}): Promise
   };
 }
 ```
+
+Fix round 1: `putObject` now passes an explicit `ContentLength` (`Buffer.byteLength(body)`) so an empty-body `PutObjectCommand` (used by the "completes an empty file immediately" test) doesn't hit the AWS SDK's "Stream of unknown length" stderr warning.
 
 - [ ] **Step 4: Write the failing splitter test**
 
@@ -3469,6 +3729,8 @@ describe('splitUpload', () => {
     expect((await ctx.deps.db.select().from(ingestionChunks).where(eq(ingestionChunks.jobId, jobId))).length).toBe(3);
     const messages = await ctx.receiveAll(ctx.deps.config.chunkQueueUrl, 2, 5000);
     expect(messages.map((m) => JSON.parse(m.Body!).chunkIndex).sort()).toEqual([1, 2]);
+    const extra = await ctx.receiveAll(ctx.deps.config.chunkQueueUrl, 1, 2000);
+    expect(extra).toEqual([]);
   });
 
   it('completes an empty file immediately', async () => {
@@ -3478,6 +3740,10 @@ describe('splitUpload', () => {
     expect(await splitUpload(ctx.deps, { key })).toEqual({ jobId, totalChunks: 0, contentLength: 0 });
     const [job] = await ctx.deps.db.select().from(ingestionJobs).where(eq(ingestionJobs.id, jobId));
     expect(job!.status).toBe('completed');
+    const chunks = await ctx.deps.db.select().from(ingestionChunks).where(eq(ingestionChunks.jobId, jobId));
+    expect(chunks).toEqual([]);
+    const messages = await ctx.receiveAll(ctx.deps.config.chunkQueueUrl, 1, 2000);
+    expect(messages).toEqual([]);
   });
 
   it('returns null for a key with no job', async () => {
@@ -3485,8 +3751,43 @@ describe('splitUpload', () => {
     await ctx.putObject(key, 'abc');
     expect(await splitUpload(ctx.deps, { key })).toBeNull();
   });
+
+  it('is a no-op when the job already finished (redelivered S3 event)', async () => {
+    const jobId = await ctx.createJob('placeholder');
+    const key = `uploads/${jobId}/vendor.csv`;
+    await ctx.deps.db.update(ingestionJobs).set({ s3Key: key }).where(eq(ingestionJobs.id, jobId));
+    await ctx.putObject(key, '0123456789');
+    await splitUpload(ctx.deps, { key });
+    await ctx.receiveAll(ctx.deps.config.chunkQueueUrl, 3);
+    await ctx.deps.db.update(ingestionChunks).set({ status: 'completed' }).where(eq(ingestionChunks.jobId, jobId));
+    await ctx.deps.db.update(ingestionJobs).set({ status: 'completed' }).where(eq(ingestionJobs.id, jobId));
+
+    await splitUpload(ctx.deps, { key });
+
+    const [job] = await ctx.deps.db.select().from(ingestionJobs).where(eq(ingestionJobs.id, jobId));
+    expect(job!.status).toBe('completed');
+    const messages = await ctx.receiveAll(ctx.deps.config.chunkQueueUrl, 1, 2000);
+    expect(messages).toEqual([]);
+  });
+
+  it('enqueues every chunk message when there are more than 10 chunks (batch-of-10 SQS sends)', async () => {
+    const jobId = await ctx.createJob('placeholder');
+    const key = `uploads/${jobId}/vendor.csv`;
+    await ctx.deps.db.update(ingestionJobs).set({ s3Key: key }).where(eq(ingestionJobs.id, jobId));
+    await ctx.putObject(key, '0'.repeat(45)); // 45 bytes, chunk size 4 -> 12 chunks, needs 2 SendMessageBatch calls
+
+    const result = await splitUpload(ctx.deps, { key });
+    expect(result).toEqual({ jobId, totalChunks: 12, contentLength: 45 });
+
+    const messages = await ctx.receiveAll(ctx.deps.config.chunkQueueUrl, 12);
+    expect(messages.map((m) => JSON.parse(m.Body!).chunkIndex).sort((a, b) => a - b)).toEqual(
+      Array.from({ length: 12 }, (_, i) => i),
+    );
+  });
 });
 ```
+
+Fix round 1: tightened the rerun test to assert the queue drains to empty, tightened the empty-file test to assert no chunk rows and no messages, and added two tests — a redelivery no-op regression (job already `completed`, chunks already `completed`, re-running `splitUpload` must leave the job `completed` and send nothing) and a >10-chunk case to exercise the `SendMessageBatchCommand` batch-of-10 split.
 
 - [ ] **Step 5: Run to verify failure**
 
@@ -3499,7 +3800,7 @@ Expected: FAIL, module `../src/splitter` not found.
 ```ts
 import { HeadObjectCommand } from '@aws-sdk/client-s3';
 import { SendMessageBatchCommand } from '@aws-sdk/client-sqs';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { computeChunks, ingestionChunks, ingestionJobs, type ChunkRange } from '@modaco/core';
 import { z } from 'zod';
 import type { IngestDeps } from './deps';
@@ -3519,6 +3820,9 @@ export function jobIdFromKey(key: string): string | null {
 
 type Deps = Pick<IngestDeps, 'db' | 's3' | 'sqs' | 'config' | 'logger'>;
 
+/** Statuses from which a split may still run: the job hasn't been finalized by the last chunk worker yet. */
+const SPLITTABLE_STATUSES = ['pending', 'splitting', 'processing'] as const;
+
 async function enqueue(deps: Deps, jobId: string, chunks: ChunkRange[]): Promise<void> {
   for (let i = 0; i < chunks.length; i += 10) {
     const batch = chunks.slice(i, i + 10);
@@ -3536,6 +3840,11 @@ async function enqueue(deps: Deps, jobId: string, chunks: ChunkRange[]): Promise
 /**
  * Splits an uploaded file into byte-range chunks using only its size (HEAD), records them, and enqueues one message per chunk.
  * Runtime is independent of file size. Safe to re-run: existing chunk rows are kept and only still-pending chunks are re-sent.
+ *
+ * A redelivered S3 event (or an at-least-once retry) must never resurrect a job the last chunk worker already finalized:
+ * once a job is 'completed' or 'failed' this is a no-op, and every status write below is conditioned on the job still
+ * being in a splittable status, so a last-worker finalize racing concurrently with a split loses cleanly (0 rows
+ * updated, nothing inserted, nothing enqueued) instead of being clobbered back to 'processing'.
  */
 export async function splitUpload(deps: Deps, input: { key: string }): Promise<{ jobId: string; totalChunks: number; contentLength: number } | null> {
   const jobId = jobIdFromKey(input.key);
@@ -3545,20 +3854,39 @@ export async function splitUpload(deps: Deps, input: { key: string }): Promise<{
 
   const head = await deps.s3.send(new HeadObjectCommand({ Bucket: deps.config.s3Bucket, Key: input.key }));
   const contentLength = head.ContentLength ?? 0;
+
+  if (job.status === 'completed' || job.status === 'failed') {
+    deps.logger.info({ jobId, status: job.status }, 'job already finished; ignoring redelivered split event');
+    return { jobId, totalChunks: job.totalChunks, contentLength };
+  }
+
   const chunks = computeChunks(contentLength, deps.config.chunkSizeBytes);
 
   if (chunks.length === 0) {
-    await deps.db.update(ingestionJobs).set({ status: 'completed', s3Key: input.key, totalChunks: 0, updatedAt: new Date() }).where(eq(ingestionJobs.id, jobId));
+    const done = await deps.db.update(ingestionJobs)
+      .set({ status: 'completed', s3Key: input.key, totalChunks: 0, updatedAt: new Date() })
+      .where(and(eq(ingestionJobs.id, jobId), inArray(ingestionJobs.status, SPLITTABLE_STATUSES)))
+      .returning({ id: ingestionJobs.id });
+    if (done.length === 0) deps.logger.info({ jobId }, 'job finished concurrently; skipping empty-file completion');
     return { jobId, totalChunks: 0, contentLength };
   }
 
+  let raced = false;
   await deps.db.transaction(async (tx) => {
-    await tx.update(ingestionJobs).set({ status: 'splitting', s3Key: input.key, updatedAt: new Date() }).where(eq(ingestionJobs.id, jobId));
+    const updated = await tx.update(ingestionJobs)
+      .set({ status: 'processing', s3Key: input.key, totalChunks: chunks.length, updatedAt: new Date() })
+      .where(and(eq(ingestionJobs.id, jobId), inArray(ingestionJobs.status, SPLITTABLE_STATUSES)))
+      .returning({ id: ingestionJobs.id });
+    if (updated.length === 0) { raced = true; return; }
     await tx.insert(ingestionChunks)
       .values(chunks.map((c) => ({ jobId, chunkIndex: c.chunkIndex, byteStart: c.byteStart, byteEnd: c.byteEnd })))
       .onConflictDoNothing({ target: [ingestionChunks.jobId, ingestionChunks.chunkIndex] });
-    await tx.update(ingestionJobs).set({ status: 'processing', totalChunks: chunks.length, updatedAt: new Date() }).where(eq(ingestionJobs.id, jobId));
   });
+
+  if (raced) {
+    deps.logger.info({ jobId }, 'job finished concurrently during split; skipping enqueue');
+    return { jobId, totalChunks: chunks.length, contentLength };
+  }
 
   const pending = await deps.db.select({ chunkIndex: ingestionChunks.chunkIndex, byteStart: ingestionChunks.byteStart, byteEnd: ingestionChunks.byteEnd })
     .from(ingestionChunks).where(and(eq(ingestionChunks.jobId, jobId), eq(ingestionChunks.status, 'pending')));
@@ -3569,10 +3897,12 @@ export async function splitUpload(deps: Deps, input: { key: string }): Promise<{
 }
 ```
 
+Fix round 1 (post-implementation review): a redelivered S3 event (or any retry) for a job the last chunk worker had already finalized would previously flip the job back to `processing` forever — nothing would be pending to enqueue, so it stayed stuck, and a failed job would be resurrected the same way. Fixed by returning a no-op result whenever `job.status` is already `completed`/`failed`, and by conditioning every remaining status-changing `UPDATE` on `status in ('pending','splitting','processing')` (via `SPLITTABLE_STATUSES`) so a concurrent last-worker finalize racing the split takes the row lock and wins cleanly instead of being overwritten. Also dropped the intermediate `'splitting'` write inside the transaction — it was immediately overwritten by the `'processing'` write in the same transaction and so was never externally visible; the enum value itself is unchanged and still valid for other code to use.
+
 - [ ] **Step 7: Run tests**
 
 Run: `pnpm --filter @modaco/ingest test test/splitter.test.ts`
-Expected: PASS, 5 tests.
+Expected: PASS, 7 tests.
 
 - [ ] **Step 8: Commit**
 
@@ -3778,7 +4108,7 @@ import type { Readable } from 'node:stream';
 import {
   bumpVersions, categories, categoryPricingFromRow, DEFAULT_CATEGORY_PRICING, fromCents, ingestionChunks, ingestionJobs,
   ingestionRejections, keys, ownedLines, parseCsvLine, priceVendorRow, products, rangeFor, rowFromFields, slugify,
-  STOCK_TTL_SECONDS, VENDOR_COLUMNS, type CategoryPricing, type Db, type PricedRow, type Redis,
+  STOCK_TTL_SECONDS, throwOnPipelineError, VENDOR_COLUMNS, type CategoryPricing, type Db, type PricedRow, type Redis,
 } from '@modaco/core';
 import type { Logger } from 'pino';
 import type { IngestDeps } from './deps';
@@ -3880,7 +4210,7 @@ class BatchWriter {
     if (written.length > 0) {
       const pipe = this.redis.pipeline();
       for (const w of written) pipe.set(keys.stock(w.id), String(w.stock), 'EX', STOCK_TTL_SECONDS);
-      await pipe.exec().catch((err) => log('stock counter publish failed', err));
+      await pipe.exec().then(throwOnPipelineError).catch((err) => log('stock counter publish failed', err));
     }
     if (categoryIds.length > 0) {
       await bumpVersions(this.redis, [...categoryIds.map(keys.categoryVersion), keys.allVersion()], log);

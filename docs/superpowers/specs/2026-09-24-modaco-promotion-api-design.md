@@ -3,6 +3,8 @@
 Date: 2026-09-24
 Status: Approved
 
+> **This is the pre-implementation design.** Where it differs from the implementation, `ADR.md` and the code govern. The two places below that described behavior the code does not have (the worker's chunk line rule in §7 and the `ver:product` bump in §5) have been amended to match it.
+
 ## 1. Goal
 
 Build the ModaCo internal API for products and promotions as described in the case study, with structural answers to the two scalability scenarios:
@@ -85,7 +87,7 @@ The same fragment is used by the listing sort, the listing projection, and the s
 | Key | Value | Purpose |
 |---|---|---|
 | `ver:category:{id}` | integer | bumped on any promotion or ingestion change touching the category |
-| `ver:product:{id}` | integer | bumped on a product-scoped promotion change or product create/update |
+| `ver:product:{id}` | integer | bumped on a product-scoped promotion change (create, cancel, or assign to or away from the product). Product create bumps its `ver:category` and `ver:all` instead |
 | `ver:all` | integer | bumped whenever any category version is bumped; guards the uncategorized listing |
 | `product:{id}` | JSON `{ productVersion, categoryVersion, categoryId, record }`, record has no stock | single product cache |
 | `list:{categoryId or all}:{sort}:{page}:{size}` | JSON `{ version, items, total }`, items have no stock | listing cache |
@@ -143,7 +145,7 @@ Vendor file: CSV, header row, columns `sku,name,category,vendor_price,stock`, UT
 
 ### Worker Lambda
 1. Batch size one. Loads the chunk row. If `completed`, exits. Otherwise increments `attempts`, sets `processing`.
-2. S3 range GET from `byteStart` to `byteEnd + 65536`. If `byteStart > 0`, discards through the first newline. Stops after the first newline past `byteEnd`. Chunk zero skips the header. Every byte is processed exactly once across chunks.
+2. S3 range GET from `byteStart - 1` (one byte early; `0` for chunk zero) to `byteEnd + 65536`. The chunk owns exactly the lines whose first byte lies in `[byteStart, byteEnd]`: the early byte shows whether `byteStart` begins a line (the byte before it is a newline) or falls mid-line (the partial line belongs to the previous chunk). Stops at the first line that starts past `byteEnd`. Chunk zero skips the header. Every line is processed exactly once across chunks.
 3. Streams lines: parse, Zod validate, run pricing rules. Failures go to a rejections buffer with a reason.
 4. Batches of 1000 rows: upsert categories by name (new categories get default margin, floor, ceiling), multi-row insert into products with on-conflict-on-sku update of `name, category_id, base_price, stock, updated_at`, insert rejections. One transaction per batch.
 5. After each batch commit: bump `ver:category` for each category touched, bump `ver:all`, set `stock:{id}` for upserted products.

@@ -1,0 +1,79 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: modaco
+      POSTGRES_PASSWORD: modaco
+      POSTGRES_DB: modaco
+    ports: ["5433:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U modaco"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  localstack:
+    image: localstack/localstack:4
+    environment:
+      SERVICES: s3,sqs
+      DEBUG: "0"
+    ports: ["4566:4566"]
+    volumes:
+      - ./docker/localstack:/etc/localstack/init/ready.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "awslocal s3api head-bucket --bucket modaco-vendor-uploads"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  api:
+    profiles: ["app"]
+    build: .
+    command: pnpm --filter @modaco/api start
+    environment:
+      PORT: 3000
+      DATABASE_URL: postgres://modaco:modaco@postgres:5432/modaco
+      REDIS_URL: redis://redis:6379
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      S3_PUBLIC_ENDPOINT: http://localhost:4566
+      S3_BUCKET: modaco-vendor-uploads
+    ports: ["3000:3000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      localstack: { condition: service_healthy }
+
+  runner:
+    profiles: ["app"]
+    build: .
+    command: pnpm --filter @modaco/ingest runner
+    environment:
+      DATABASE_URL: postgres://modaco:modaco@postgres:5432/modaco
+      REDIS_URL: redis://redis:6379
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_ENDPOINT_URL: http://localstack:4566
+      S3_BUCKET: modaco-vendor-uploads
+      S3_EVENTS_QUEUE_URL: http://localstack:4566/000000000000/modaco-s3-events
+      CHUNK_QUEUE_URL: http://localstack:4566/000000000000/modaco-ingest-chunks
+      DLQ_URL: http://localstack:4566/000000000000/modaco-ingest-dlq
+      CHUNK_SIZE_BYTES: 4194304
+      UPSERT_BATCH_SIZE: 1000
+      LAMBDA_TIMEOUT_MS: 60000
+      LAMBDA_MEMORY_MB: 256
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      localstack: { condition: service_healthy }
