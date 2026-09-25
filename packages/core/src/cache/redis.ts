@@ -13,3 +13,10 @@ export function createRedis(url: string): Redis {
 }
 
 export type { Redis };
+
+/** ioredis resolves pipeline().exec() instead of rejecting; surface a null result or any per-command error. */
+export function throwOnPipelineError(results: [Error | null, unknown][] | null): void {
+  if (!results) throw new Error('pipeline exec returned null');
+  const failed = results.find(([err]) => err != null);
+  if (failed) throw failed[0];
+}

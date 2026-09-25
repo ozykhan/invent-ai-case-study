@@ -1,5 +1,6 @@
 import type Redis from 'ioredis';
 import { keys } from './keys';
+import { throwOnPipelineError } from './redis';
 
 export function parseVersion(raw: string | null | undefined): number {
   const n = Number(raw);
@@ -25,10 +26,7 @@ export async function bumpVersions(redis: Redis, versionKeys: string[], log: Log
       // ioredis resolves pipeline().exec() with [err, result] pairs (or null) instead of
       // rejecting when a queued command fails, so a dead-connection failure must be surfaced
       // manually to trigger the retry loop below.
-      const results = await pipe.exec();
-      if (!results) throw new Error('pipeline exec returned null');
-      const failed = results.find(([err]) => err != null);
-      if (failed) throw failed[0];
+      throwOnPipelineError(await pipe.exec());
       return;
     } catch (err) {
       lastErr = err;
