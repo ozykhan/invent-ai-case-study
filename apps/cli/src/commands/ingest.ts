@@ -26,7 +26,9 @@ export function registerIngest(program: Command): void {
       // The API accepts [A-Za-z0-9._-]{1,128} as a filename.
       const job = await client.createIngestionJob(basename(file).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 128) || 'vendor.csv');
       log(`job ${job.jobId}: uploading ${file} (${(size / 1_048_576).toFixed(1)} MB)`);
-      const put = await fetch(job.uploadUrl, { method: 'PUT', body: readFileSync(file) });
+      // The presigned PUT bypasses ApiClient (a different origin, S3/LocalStack), so it doesn't get --timeout for
+      // free the way every other request does; apply it explicitly so a stalled upload doesn't hang forever.
+      const put = await fetch(job.uploadUrl, { method: 'PUT', body: readFileSync(file), signal: AbortSignal.timeout(g.timeoutMs) });
       if (!put.ok) throw new Error(`upload failed: HTTP ${put.status} ${await put.text()}`);
       log(`uploaded in ${elapsed().toFixed(1)}s; waiting for the splitter and workers`);
       for (;;) {
