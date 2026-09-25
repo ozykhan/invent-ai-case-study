@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRedis } from './redis';
-import { readThrough } from './read-through';
+import { CacheWaitTimeoutError, readThrough } from './read-through';
 
 const redis = createRedis(process.env.REDIS_URL ?? 'redis://localhost:6379');
 beforeAll(() => redis.connect());
@@ -58,11 +58,72 @@ describe('readThrough', () => {
     expect(await redis.get('k')).toBeNull();
   });
 
-  it('bypasses the cache when the lock holder is slow', async () => {
-    await redis.set('lock:k', '1', 'PX', 5000);
-    const res = await readThrough(redis, 'k', async () => ({ value: 'y', ttlSeconds: 10 }), { waitMs: 50, pollMs: 10 });
-    expect(res).toEqual({ value: 'y', source: 'bypass' });
+  it('coalesces a slow (~400 ms) holder build across 20 concurrent waiters with the default options', async () => {
+    let builds = 0;
+    const build = async () => {
+      builds++;
+      await new Promise((r) => setTimeout(r, 400));
+      return { value: 'slow', ttlSeconds: 10 };
+    };
+    const results = await Promise.all(Array.from({ length: 21 }, () => readThrough(redis, 'k', build)));
+    expect(builds).toBe(1);
+    expect(results.filter((r) => r.source === 'built')).toHaveLength(1);
+    expect(results.filter((r) => r.source === 'hit')).toHaveLength(20);
+    expect(results.every((r) => r.value === 'slow')).toBe(true);
+  });
+
+  it('fails closed: a waiter whose deadline passes while the lock is held throws CacheWaitTimeoutError and never builds', async () => {
+    await redis.set('lock:k', 'someone-else', 'PX', 5000);
+    const build = vi.fn(async () => ({ value: 'y', ttlSeconds: 10 }));
+    const start = Date.now();
+    const err = await readThrough(redis, 'k', build, { waitMs: 150 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CacheWaitTimeoutError);
+    expect((err as CacheWaitTimeoutError).key).toBe('k');
+    expect(Date.now() - start).toBeGreaterThanOrEqual(140);
+    expect(build).not.toHaveBeenCalled();
     expect(await redis.get('k')).toBeNull();
+    expect(await redis.get('lock:k')).toBe('someone-else');
+  });
+
+  it('backs off while polling, so a long wait costs a handful of round trips rather than one every 20 ms', async () => {
+    await redis.set('lock:k', 'someone-else', 'PX', 5000);
+    const mgetSpy = vi.spyOn(redis, 'mget');
+    try {
+      await expect(readThrough(redis, 'k', async () => ({ value: 'y', ttlSeconds: 10 }), { waitMs: 1000 }))
+        .rejects.toBeInstanceOf(CacheWaitTimeoutError);
+      // A fixed 20 ms poll would be ~50 MGETs over 1 s; 20 ms growing to a 100 ms cap is ~13.
+      expect(mgetSpy.mock.calls.length).toBeLessThanOrEqual(15);
+      expect(mgetSpy.mock.calls.length).toBeGreaterThanOrEqual(5);
+    } finally {
+      mgetSpy.mockRestore();
+    }
+  });
+
+  it('an old holder whose lock expired mid-build never deletes the lock a newer holder took', async () => {
+    const res = readThrough(redis, 'k', async () => {
+      await new Promise((r) => setTimeout(r, 250));
+      return { value: 'old', ttlSeconds: 10 };
+    }, { lockMs: 100 });
+    await new Promise((r) => setTimeout(r, 150)); // the old holder's 100 ms lock has expired
+    expect(await redis.set('lock:k', 'newer-holder', 'PX', 5000, 'NX')).toBe('OK');
+    expect(await res).toEqual({ value: 'old', source: 'built' });
+    expect(await redis.get('lock:k')).toBe('newer-holder');
+  });
+
+  it('waiters still build directly when a poll hits a redis error', async () => {
+    await redis.set('lock:k', 'someone-else', 'PX', 5000);
+    const realMget = redis.mget.bind(redis) as (...args: unknown[]) => Promise<unknown>;
+    let calls = 0;
+    const mget = vi.spyOn(redis, 'mget').mockImplementation(((...args: unknown[]) =>
+      ++calls >= 2 ? Promise.reject(new Error('redis gone')) : realMget(...args)) as never);
+    const errors: unknown[] = [];
+    try {
+      const res = await readThrough(redis, 'k', async () => ({ value: 'direct', ttlSeconds: 10 }), { onError: (e) => errors.push(e) });
+      expect(res).toEqual({ value: 'direct', source: 'bypass' });
+    } finally {
+      mget.mockRestore();
+    }
+    expect(errors).toEqual([expect.objectContaining({ message: 'redis gone' })]);
   });
 
   it('falls through to the builder when redis is unavailable', async () => {

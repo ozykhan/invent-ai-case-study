@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type Redis from 'ioredis';
 import { keys } from './keys';
 
@@ -16,11 +17,35 @@ export interface ReadThroughOptions<T, E = undefined> {
   isFresh?: (value: T, extraRaw: (string | null | undefined)[]) => Promise<boolean | FreshResult<E>>;
   /** Keys MGET'd alongside the entry key on every read attempt, in `isFresh`'s `extraRaw`. */
   extraKeys?: string[];
+  /**
+   * TTL of the build lock. It only matters if a holder dies without releasing it, and it must stay
+   * above the worst-case build time: a lock that expires under a live holder lets a second holder
+   * in and tells every waiter to build (the cold-start collapse this replaced). Callers bound their
+   * builds (pool acquire timeout plus statement_timeout) to keep that true.
+   */
   lockMs?: number;
+  /** How long a waiter waits for the holder before failing with CacheWaitTimeoutError. */
   waitMs?: number;
+  /** First poll interval. Each poll doubles it, up to maxPollMs. */
   pollMs?: number;
+  maxPollMs?: number;
   onError?: (err: unknown) => void;
 }
+
+/**
+ * A waiter gave up on the key's lock holder. It did not build, so an overloaded origin isn't handed
+ * one more build per waiter; the caller should shed the request (e.g. 503 and retry).
+ */
+export class CacheWaitTimeoutError extends Error {
+  constructor(public readonly key: string, public readonly waitedMs: number) {
+    super(`gave up after ${waitedMs} ms waiting for another request to build cache key ${key}`);
+    this.name = 'CacheWaitTimeoutError';
+  }
+}
+
+// Compare-and-delete: only the holder whose token is still in the lock may release it. A holder
+// whose lock expired must not delete the lock a newer holder took since.
+const RELEASE_LOCK = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`;
 
 export interface BuildResult<T> {
   value: T;
@@ -42,6 +67,13 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /**
  * Cache-aside read with request coalescing. Any Redis failure degrades to a direct build.
  * `isFresh` lets the caller reject an entry whose embedded version numbers are stale.
+ *
+ * Coalescing fails closed. A miss takes the key's lock (a random token, `lockMs` TTL) and builds;
+ * every other miss polls, with backoff, until one of:
+ * - a fresh entry appears: a hit;
+ * - the lock is released without an entry (the holder built with `cache: false`, its SET failed,
+ *   or its build threw): the waiter builds directly;
+ * - `waitMs` passes: CacheWaitTimeoutError, with no build.
  */
 export async function readThrough<T, E = undefined>(
   redis: Redis | null,
@@ -49,7 +81,7 @@ export async function readThrough<T, E = undefined>(
   build: () => Promise<BuildResult<T>>,
   opts: ReadThroughOptions<T, E> = {},
 ): Promise<CacheOutcome<T, E>> {
-  const { lockMs = 2000, waitMs = 200, pollMs = 20, onError = () => {}, extraKeys = [] } = opts;
+  const { lockMs = 30_000, waitMs = 5000, pollMs = 20, maxPollMs = 100, onError = () => {}, extraKeys = [] } = opts;
   if (!redis) return { value: (await build()).value, source: 'bypass' };
 
   const tryHit = async (): Promise<{ value: T; extra?: E } | undefined> => {
@@ -84,18 +116,28 @@ export async function readThrough<T, E = undefined>(
     return { hit: { value }, lockHeld };
   };
 
-  let lockKey: string | undefined;
+  const lockKey = keys.lock(key);
+  let lockToken: string | undefined;
+  let timedOut = false;
   try {
     const hit = await tryHit();
     if (hit !== undefined) return { value: hit.value, source: 'hit', extra: hit.extra };
 
-    const locked = await redis.set(keys.lock(key), '1', 'PX', lockMs, 'NX');
+    const token = randomUUID();
+    const locked = await redis.set(lockKey, token, 'PX', lockMs, 'NX');
     if (locked === 'OK') {
-      lockKey = keys.lock(key);
+      lockToken = token;
     } else {
       const deadline = Date.now() + waitMs;
-      while (Date.now() < deadline) {
-        await sleep(pollMs);
+      let delay = pollMs;
+      for (;;) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) {
+          timedOut = true;
+          break;
+        }
+        await sleep(Math.min(delay, remaining));
+        delay = Math.min(maxPollMs, delay * 2);
         const { hit: late, lockHeld } = await tryHitAndLock();
         if (late !== undefined) return { value: late.value, source: 'hit', extra: late.extra };
         // The holder released the lock without writing an entry (e.g. it built with `cache:
@@ -107,7 +149,10 @@ export async function readThrough<T, E = undefined>(
   } catch (err) {
     onError(err);
   }
-  if (lockKey === undefined) return { value: (await build()).value, source: 'bypass' };
+  // Fail closed: the holder is still building (or queued behind an overloaded origin). Building
+  // here too is what turned a slow cold start into a collapse, so shed the request instead.
+  if (timedOut) throw new CacheWaitTimeoutError(key, waitMs);
+  if (lockToken === undefined) return { value: (await build()).value, source: 'bypass' };
 
   // The lock holder. A build() error is the caller's (e.g. Postgres down), not cache degradation: it
   // propagates as is, and building again would only repeat it. Only the cache write is best effort.
@@ -118,6 +163,6 @@ export async function readThrough<T, E = undefined>(
     }
     return { value: built.value, source: 'built' };
   } finally {
-    await redis.del(lockKey).catch(onError);
+    await redis.eval(RELEASE_LOCK, 1, lockKey, lockToken).catch(onError);
   }
 }
