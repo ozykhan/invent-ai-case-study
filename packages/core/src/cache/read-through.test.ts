@@ -110,6 +110,58 @@ describe('readThrough', () => {
     expect(await redis.get('lock:k')).toBe('newer-holder');
   });
 
+  it('an old holder that built with cache: false never overwrites a newer holder\'s lock with the uncached marker', async () => {
+    const res = readThrough(redis, 'k', async () => {
+      await new Promise((r) => setTimeout(r, 250));
+      return { value: 'old', ttlSeconds: 10, cache: false };
+    }, { lockMs: 100 });
+    await new Promise((r) => setTimeout(r, 150)); // the old holder's 100 ms lock has expired
+    expect(await redis.set('lock:k', 'newer-holder', 'PX', 5000, 'NX')).toBe('OK');
+    expect(await res).toEqual({ value: 'old', source: 'built' });
+    expect(await redis.get('lock:k')).toBe('newer-holder');
+  });
+
+  it('reports the time a waiter actually waited, not the configured waitMs', async () => {
+    await redis.set('lock:k', 'someone-else', 'PX', 5000);
+    const realMget = redis.mget.bind(redis) as (...args: unknown[]) => Promise<unknown>;
+    const mget = vi.spyOn(redis, 'mget').mockImplementation(((...args: unknown[]) =>
+      new Promise((r) => setTimeout(r, 200)).then(() => realMget(...args))) as never);
+    try {
+      const err = await readThrough(redis, 'k', async () => ({ value: 'y', ttlSeconds: 10 }), { waitMs: 100 }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(CacheWaitTimeoutError);
+      expect((err as CacheWaitTimeoutError).waitedMs).toBeGreaterThanOrEqual(200); // one 20 ms sleep plus a 200 ms poll
+    } finally {
+      mget.mockRestore();
+    }
+  });
+
+  it('a waiter stops polling when its signal aborts, throwing the abort reason without building', async () => {
+    await redis.set('lock:k', 'someone-else', 'PX', 5000);
+    const controller = new AbortController();
+    const reason = new Error('client gone');
+    const build = vi.fn(async () => ({ value: 'y', ttlSeconds: 10 }));
+    setTimeout(() => controller.abort(reason), 100);
+    const start = Date.now();
+    const err = await readThrough(redis, 'k', build, { signal: controller.signal }).catch((e: unknown) => e);
+    expect(err).toBe(reason);
+    expect(Date.now() - start).toBeLessThan(500); // well before the 5 s waitMs
+    expect(build).not.toHaveBeenCalled();
+    expect(await redis.get('lock:k')).toBe('someone-else');
+  });
+
+  it('a waiter whose signal aborted does not take over a released lock', async () => {
+    const controller = new AbortController();
+    const build = vi.fn(async () => ({ value: 'y', ttlSeconds: 10 }));
+    await redis.set('lock:k', 'someone-else', 'PX', 5000);
+    const waiting = readThrough(redis, 'k', build, { signal: controller.signal }).catch((e: unknown) => e);
+    await new Promise((r) => setTimeout(r, 30));
+    controller.abort(new Error('client gone'));
+    await redis.del('lock:k'); // the holder failed: an alive waiter would take over here
+    expect(await waiting).toEqual(new Error('client gone'));
+    expect(build).not.toHaveBeenCalled();
+    expect(await redis.get('lock:k')).toBeNull();
+  });
+
   it('when the holder build fails, one waiter takes the lock over and builds; the rest wait for its entry', async () => {
     let builds = 0;
     const build = async () => {

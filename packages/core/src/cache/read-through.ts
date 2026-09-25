@@ -29,6 +29,12 @@ export interface ReadThroughOptions<T, E = undefined> {
   /** First poll interval. Each poll doubles it, up to maxPollMs. */
   pollMs?: number;
   maxPollMs?: number;
+  /**
+   * The caller's interest in the result (e.g. the request's client is still connected). A waiter
+   * checks it after every poll interval and, once it has aborted, stops waiting and throws
+   * `signal.reason` without building or taking over the lock. The builder checks it itself.
+   */
+  signal?: AbortSignal;
   onError?: (err: unknown) => void;
 }
 
@@ -37,6 +43,7 @@ export interface ReadThroughOptions<T, E = undefined> {
  * one more build per waiter; the caller should shed the request (e.g. 503 and retry).
  */
 export class CacheWaitTimeoutError extends Error {
+  /** `waitedMs` is the time actually spent waiting, which can overrun the configured waitMs by one poll. */
   constructor(public readonly key: string, public readonly waitedMs: number) {
     super(`gave up after ${waitedMs} ms waiting for another request to build cache key ${key}`);
     this.name = 'CacheWaitTimeoutError';
@@ -90,7 +97,7 @@ export async function readThrough<T, E = undefined>(
   build: () => Promise<BuildResult<T>>,
   opts: ReadThroughOptions<T, E> = {},
 ): Promise<CacheOutcome<T, E>> {
-  const { lockMs = 30_000, waitMs = 5000, pollMs = 20, maxPollMs = 100, onError = () => {}, extraKeys = [] } = opts;
+  const { lockMs = 30_000, waitMs = 5000, pollMs = 20, maxPollMs = 100, onError = () => {}, extraKeys = [], signal } = opts;
   if (!redis) return { value: (await build()).value, source: 'bypass' };
 
   const tryHit = async (): Promise<{ value: T; extra?: E } | undefined> => {
@@ -131,23 +138,29 @@ export async function readThrough<T, E = undefined>(
     return (await redis.set(lockKey, token, 'PX', lockMs, 'NX')) === 'OK' ? token : undefined;
   };
   let lockToken: string | undefined;
-  let timedOut = false;
+  let waitedMs: number | undefined; // set when the wait deadline passed
+  let abandoned = false; // set when the signal aborted while waiting
   try {
     const hit = await tryHit();
     if (hit !== undefined) return { value: hit.value, source: 'hit', extra: hit.extra };
 
     lockToken = await tryLock();
     if (lockToken === undefined) {
-      const deadline = Date.now() + waitMs;
+      const waitStart = Date.now();
+      const deadline = waitStart + waitMs;
       let delay = pollMs;
       for (;;) {
         const remaining = deadline - Date.now();
         if (remaining <= 0) {
-          timedOut = true;
+          waitedMs = Date.now() - waitStart;
           break;
         }
         await sleep(Math.min(delay, remaining));
         delay = Math.min(maxPollMs, delay * 2);
+        if (signal?.aborted) {
+          abandoned = true;
+          break;
+        }
         const { hit: late, lock } = await tryHitAndLock();
         if (late !== undefined) return { value: late.value, source: 'hit', extra: late.extra };
         // The holder built with `cache: false`: no entry is coming, and waiting out the rest of
@@ -163,9 +176,11 @@ export async function readThrough<T, E = undefined>(
   } catch (err) {
     onError(err);
   }
+  // Nobody wants the result any more: stop without building or taking the lock over.
+  if (abandoned) signal!.throwIfAborted();
   // Fail closed: the holder is still building (or queued behind an overloaded origin). Building
   // here too is what turned a slow cold start into a collapse, so shed the request instead.
-  if (timedOut) throw new CacheWaitTimeoutError(key, waitMs);
+  if (waitedMs !== undefined) throw new CacheWaitTimeoutError(key, waitedMs);
   if (lockToken === undefined) return { value: (await build()).value, source: 'bypass' };
 
   // The lock holder. A build() error is the caller's (e.g. Postgres down), not cache degradation: it
