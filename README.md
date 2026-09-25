@@ -99,6 +99,60 @@ What to look for:
 
 Results from one run are in ADR.md sections 5 and 6.
 
+## CLI (`pnpm modaco`)
+
+`apps/cli` is a command-line client for every endpoint plus a load generator. It needs only a base URL (`--url`, else `API_URL`, else `http://localhost:3000`), so it works the same against one local API, the nginx load balancer below, or a remote deployment. Every command takes `--json` and then prints one JSON document to stdout. Exit codes: 0 ok, 1 API/check/transport failure, 2 usage error, 130 interrupted.
+
+```bash
+pnpm modaco health                                        # status, checks and the answering instance
+pnpm modaco health --watch 1s                             # keep polling (useful while scaling replicas)
+pnpm modaco products list --category accessories --sort=-effective_price --page-size 5
+pnpm modaco products get 1
+pnpm modaco products create --sku DEMO-1 --name Demo --category-id 1 --base-price 19.99 --stock 3
+pnpm modaco products stock 1 --delta -2                   # or --set 10
+pnpm modaco promotions create --name "50% off" --type percentage --value 50 --category 1
+pnpm modaco promotions target <promotionId> --product 2
+pnpm modaco promotions cancel <promotionId>
+pnpm modaco ingest upload tmp/vendor-500k.csv             # create job, upload, poll to completion
+pnpm modaco ingest rejections <jobId> --page-size 10
+```
+
+### Load testing
+
+```bash
+pnpm modaco load browse --rate 2000/s --duration 60s               # open model: fixed arrival rate
+pnpm modaco load browse --concurrency 100 --duration 60s           # closed model: fixed workers
+pnpm modaco load write-mix --rate 500/s --duration 60s             # reads + stock writes + promotion churn
+pnpm modaco load flash-sale --category accessories --concurrency 50 --duration 15s
+pnpm modaco load browse --rate 2000/s --ramp 30s --duration 90s --out tmp/run.json
+```
+
+- **Scenarios.**
+  - `browse`: category listings with random page and sort, plus product details (`--mix list=70,detail=30`, `--max-page 5`, `--category`).
+  - `write-mix`: reads plus stock writes plus promotion create/cancel cycles that bump cache versions (`--mix list=60,detail=25,stock=14,promo=1`).
+  - `flash-sale`: the `demo:flash-sale` flow on the load engine. It records a `before` and an `after` phase and checks that a product created mid-sale reads back at half price; the run exits 1 if that check fails.
+- **Models.** `--rate` holds a constant arrival rate and times each request from its scheduled start, so a stalling server is charged for the requests it delayed (no coordinated omission). Requests over `--max-inflight` (default 10000) are counted as `dropped`. `--concurrency` runs fixed workers, which is useful for finding saturation throughput.
+- **Output.** Per label and in total: count, req/s, p50/p90/p95/p99/p99.9/max in ms, status codes, transport errors (timeout, ECONNRESET, ECONNREFUSED) and drops. Also the share of responses served by each `X-Instance-Id`. `--json` or `--out` gives the full result document for comparing runs.
+- **Repeatability.** `--seed` makes the request sequence repeatable. Setup samples up to 20 listing pages to find product ids and categories, so the catalog must not be empty.
+
+### Several API replicas behind nginx
+
+```bash
+docker compose up -d postgres redis localstack && pnpm db:migrate && pnpm seed   # if not done already
+docker compose --profile lb up --build -d --scale api-lb=4                       # 4 replicas + nginx on :8080
+pnpm modaco --url http://localhost:8080 health --watch 1s                        # instance id rotates
+pnpm modaco --url http://localhost:8080 load browse --rate 2000/s --duration 60s --out tmp/lb-4.json
+
+docker compose --profile lb up -d --scale api-lb=1 && docker compose restart nginx   # nginx resolves replicas at startup
+pnpm modaco --url http://localhost:8080 load browse --rate 2000/s --duration 60s --out tmp/lb-1.json
+```
+
+- Each replica is limited to `API_CPUS` cores (default 1), so adding replicas adds capacity instead of sharing every host core.
+- The API sets `X-Instance-Id` on every response: `INSTANCE_ID` if set, else the hostname, which is the container id under Compose. It exposes nothing beyond that hostname; drop the middleware if the API is ever public.
+- Each replica holds a Postgres pool of 10 and Postgres allows 100 connections by default, so up to about 9 replicas fit. More need `max_connections` raised or a pooler (PgBouncer; RDS Proxy on AWS).
+- Postgres, Redis, nginx, the replicas and the load generator share this machine's CPUs. Local runs compare configurations (1 vs N replicas); they do not predict production capacity.
+- Stop the replicas with `docker compose --profile lb stop api-lb nginx`.
+
 ## Tests
 
 ```bash
@@ -135,8 +189,10 @@ Optional: `ChunkSizeBytes` (4194304), `UpsertBatchSize` (1000), `WorkerReservedC
 ```
 apps/api/            Express API: products, promotions, ingestion jobs; integration tests
 apps/ingest/         Lambda handlers (splitter, worker, dead-letter), local runner, esbuild bundle
+apps/cli/            modaco CLI: operational commands and the load generator (pnpm modaco)
 packages/core/       Drizzle schema and migrations, effective-price SQL, pricing rules, cache helpers, chunking
 infra/template.yaml  SAM template for the ingestion pipeline
+infra/nginx/         nginx load balancer config for the Compose "lb" profile
 docker/localstack/   LocalStack init script: bucket, queues, redrive, S3 notification
 scripts/             seed, vendor file generator, ingest and flash-sale demos, schema export
 docs/superpowers/    design spec and implementation plan

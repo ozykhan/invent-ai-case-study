@@ -40,7 +40,7 @@ apps/cli/
     health.ts             health [--watch <interval>]
     products.ts           products list|get|create|stock
     promotions.ts         promotions create|get|cancel|target
-    ingest.ts             ingest <file> | ingest status <jobId> | ingest rejections <jobId>
+    ingest.ts             ingest upload <file> | ingest status <jobId> | ingest rejections <jobId>
     load.ts               load <scenario> with the shared load options
   src/load/
     engine.ts             runs a phase: open or closed model, warmup, ramp, duration, max-inflight
@@ -83,11 +83,11 @@ Each command is a thin typed wrapper over one endpoint. On a non-2xx response th
 | `promotions get <id>` | `GET /promotions/:id` |
 | `promotions cancel <id>` | `POST /promotions/:id/cancel` |
 | `promotions target <id> (--product <id> \| --category <id>)` | `PUT /promotions/:id/target` |
-| `ingest <file> [--poll 1s]` | `POST /ingestion/jobs`, `PUT` to the presigned URL, then poll until `completed` or `failed` |
+| `ingest upload <file> [--poll 1s]` | `POST /ingestion/jobs`, `PUT` to the presigned URL, then poll until `completed` or `failed`. (`upload` is a subcommand: commander cannot mix a positional file with the `status`/`rejections` subcommands.) |
 | `ingest status <jobId>` | `GET /ingestion/jobs/:id` |
 | `ingest rejections <jobId> [--page n] [--page-size n]` | `GET /ingestion/jobs/:id/rejections` |
 
-Human output: a compact table for lists, key/value lines for single objects. `--json` prints the response body unchanged. For `ingest <file>` it prints the final job document.
+Human output: a compact table for lists, key/value lines for single objects. `--json` prints the response body unchanged. For `ingest upload` it prints the final job document.
 
 ## 6. Load engine
 
@@ -197,7 +197,7 @@ The report shows both phases and the check result, and records the first item's 
 Reads with concurrent writes, to exercise version-counter cache invalidation and stock counters under load. Setup is the same as `browse`. Default mix, overridable with `--mix`:
 
 - `list` 60%, `detail` 25%: as in `browse`.
-- `stock` 14%: `PATCH /products/<random id>/stock` with `{ "delta": ±1 }`.
+- `stock` 14%: `PATCH /products/<random id>/stock` with `{ "stock": <0..100> }`. An absolute set never fails. A `{ "delta": -1 }` on a product at stock 0 returns 422, which would add noise to the error stats.
 - `promo` 1%: alternates between creating and cancelling promotions, one request per slot. If the scenario holds no open promotion, the slot sends `POST /promotions` (10% on a random sampled product, labelled `promo:create`), and the response hook stores the new id. Otherwise it sends `POST /promotions/<id>/cancel` for the oldest open one (`promo:cancel`). Each promotion therefore lives about one promo slot interval. Every create and cancel bumps version counters, which forces cache rebuilds while reads continue.
 
 At the end, the scenario cancels any promotion it created that is still open, for example because the run was interrupted.
