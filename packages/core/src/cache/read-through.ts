@@ -66,6 +66,24 @@ export async function readThrough<T, E = undefined>(
     return { value };
   };
 
+  // Used while polling as a non-holder: fetches the entry, the lock, and extraKeys together in one
+  // round trip, so a waiter can tell "still building" (lock held, no entry) apart from "the holder
+  // decided not to cache" (lock released, no entry) without a second call.
+  const tryHitAndLock = async (): Promise<{ hit: { value: T; extra?: E } | undefined; lockHeld: boolean }> => {
+    const raw = await redis.mget(key, keys.lock(key), ...extraKeys);
+    const lockHeld = raw[1] !== null && raw[1] !== undefined;
+    const rawEntry = raw[0];
+    if (rawEntry === null || rawEntry === undefined) return { hit: undefined, lockHeld };
+    const value = JSON.parse(rawEntry) as T;
+    if (opts.isFresh) {
+      const result = await opts.isFresh(value, raw.slice(2));
+      const check: FreshResult<E> = typeof result === 'boolean' ? { fresh: result } : result;
+      if (!check.fresh) return { hit: undefined, lockHeld };
+      return { hit: { value, extra: check.extra }, lockHeld };
+    }
+    return { hit: { value }, lockHeld };
+  };
+
   let lockKey: string | undefined;
   try {
     const hit = await tryHit();
@@ -78,8 +96,12 @@ export async function readThrough<T, E = undefined>(
       const deadline = Date.now() + waitMs;
       while (Date.now() < deadline) {
         await sleep(pollMs);
-        const late = await tryHit();
+        const { hit: late, lockHeld } = await tryHitAndLock();
         if (late !== undefined) return { value: late.value, source: 'hit', extra: late.extra };
+        // The holder released the lock without writing an entry (e.g. it built with `cache:
+        // false`). Waiting out the rest of waitMs would only delay every waiter by the same
+        // amount; build directly instead, same as the no-lock-acquired bypass path below.
+        if (!lockHeld) break;
       }
     }
   } catch (err) {

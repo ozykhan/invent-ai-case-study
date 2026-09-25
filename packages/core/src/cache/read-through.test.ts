@@ -42,6 +42,22 @@ describe('readThrough', () => {
     expect(results.filter((r) => r.source === 'hit')).toHaveLength(7);
   });
 
+  it('stops waiters as soon as the lock is released without an entry being written, instead of polling out waitMs', async () => {
+    let builds = 0;
+    const build = async () => {
+      builds++;
+      await new Promise((r) => setTimeout(r, 20));
+      return { value: 'empty', ttlSeconds: 10, cache: false };
+    };
+    const start = Date.now();
+    const results = await Promise.all(Array.from({ length: 10 }, () => readThrough(redis, 'k', build, { waitMs: 1000, pollMs: 20 })));
+    const elapsed = Date.now() - start;
+    expect(results.every((r) => r.value === 'empty')).toBe(true);
+    expect(builds).toBe(10); // no coalescing possible: nothing is ever written for the others to hit
+    expect(elapsed).toBeLessThan(500); // well under waitMs (1000ms): waiters stop polling long before the deadline
+    expect(await redis.get('k')).toBeNull();
+  });
+
   it('bypasses the cache when the lock holder is slow', async () => {
     await redis.set('lock:k', '1', 'PX', 5000);
     const res = await readThrough(redis, 'k', async () => ({ value: 'y', ttlSeconds: 10 }), { waitMs: 50, pollMs: 10 });
