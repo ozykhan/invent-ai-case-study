@@ -34,7 +34,7 @@ export async function resolveCategoryId(deps: AppDeps, slug: string, signal?: Ab
     throwIfClientGone(signal);
     const [row] = await deps.db.select({ id: categories.id }).from(categories).where(eq(categories.slug, slug));
     return { value: row?.id ?? null, ttlSeconds: row ? SLUG_TTL_SECONDS : 5 };
-  }, { onError: onError(deps) });
+  }, { onError: onError(deps), signal });
   return value;
 }
 
@@ -70,6 +70,7 @@ export async function getCachedProduct(deps: AppDeps, id: number, signal?: Abort
     };
   }, {
     onError: onError(deps),
+    signal,
     // Round trip 1 (on a hit): MGET(product:{id}, ver:product:{id}) — the entry and its own
     // version together, so checking productVersion doesn't need a separate read.
     extraKeys: [keys.productVersion(id)],
@@ -122,6 +123,7 @@ export async function getCachedProductPage(
     return { value: { version: version ?? 0, ...page }, ttlSeconds: ttlSeconds(now, boundary), cache: ok };
   }, {
     onError: onError(deps),
+    signal,
     // Round trip 1 (on a hit): MGET(list entry, its version key) — the version key is known
     // upfront (it only depends on the query's category, not on the fetched page), so it's bundled
     // with the entry read. Stock is fetched separately by the caller once item ids are known

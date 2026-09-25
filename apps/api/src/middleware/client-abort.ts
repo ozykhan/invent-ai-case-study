@@ -19,7 +19,8 @@ export class ClientGoneError extends Error {
 export const clientAbort: RequestHandler = (_req, res, next) => {
   const controller = new AbortController();
   res.on('close', () => {
-    if (!res.writableFinished) controller.abort();
+    // The reason is what `signal.throwIfAborted()` throws, e.g. inside a readThrough waiter.
+    if (!res.writableFinished) controller.abort(new ClientGoneError());
   });
   res.locals.signal = controller.signal;
   next();

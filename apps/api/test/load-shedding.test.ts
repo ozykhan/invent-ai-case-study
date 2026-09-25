@@ -1,4 +1,4 @@
-import { CacheWaitTimeoutError, type Db } from '@modaco/core';
+import { CacheWaitTimeoutError, createRedis, keys, type Db } from '@modaco/core';
 import { sql } from 'drizzle-orm';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { request as httpRequest, type Server } from 'node:http';
@@ -132,6 +132,24 @@ describe('client abort propagation', () => {
     await expect(service.getProduct(1, aborted())).rejects.toBeInstanceOf(ClientGoneError);
   });
 
+  it('stops a cache waiter as soon as its client goes, instead of polling out the 5 s wait', async () => {
+    const redis = createRedis(process.env.REDIS_URL ?? 'redis://localhost:6379');
+    await redis.connect();
+    const lock = keys.lock(keys.list(987654, 'asc', 1, 20)); // a key no real category uses
+    await redis.set(lock, 'another-request', 'PX', 5000);
+    try {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new ClientGoneError()), 50);
+      const start = Date.now();
+      await expect(getCachedProductPage({ ...deps(), redis }, { categoryId: 987654, sort: 'asc', page: 1, pageSize: 20 }, controller.signal))
+        .rejects.toBeInstanceOf(ClientGoneError);
+      expect(Date.now() - start).toBeLessThan(1000);
+    } finally {
+      await redis.del(lock);
+      await redis.quit();
+    }
+  });
+
   describe('the clientAbort middleware', () => {
     let server: Server | undefined;
     afterAll(() => new Promise<void>((r) => (server ? server.close(() => r()) : r())));
@@ -156,6 +174,7 @@ describe('client abort propagation', () => {
       });
       await abortedSeen;
       expect(seen?.aborted).toBe(true);
+      expect(seen?.reason).toBeInstanceOf(ClientGoneError);
       await new Promise<void>((r) => server!.close(() => r()));
       server = undefined;
     });
