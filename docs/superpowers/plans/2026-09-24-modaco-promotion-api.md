@@ -2915,12 +2915,17 @@ describe('POST /promotions', () => {
     expect(await ctx.redis.get(keys.allVersion())).toBe('1');
   });
 
-  it('creates a product promotion and bumps only the product version', async () => {
+  it('creates a product promotion and bumps the product, its category, and all', async () => {
+    const warm = await request(ctx.app).get('/products?category=accessories');
+    expect(warm.body.items.find((i: { id: number }) => i.id === belt.id).effectivePrice).toBe('20.00');
     const res = await request(ctx.app).post('/promotions').send(body({ target: { productId: belt.id }, discountType: 'fixed', value: '5.00' }));
     expect(res.status).toBe(201);
     expect((await request(ctx.app).get(`/products/${belt.id}`)).body.effectivePrice).toBe('15.00');
     expect(await ctx.redis.get(keys.productVersion(belt.id))).toBe('1');
-    expect(await ctx.redis.get(keys.categoryVersion(acc.id))).toBeNull();
+    expect(await ctx.redis.get(keys.categoryVersion(acc.id))).toBe('1');
+    expect(await ctx.redis.get(keys.allVersion())).toBe('1');
+    const list = await request(ctx.app).get('/products?category=accessories');
+    expect(list.body.items.find((i: { id: number }) => i.id === belt.id).effectivePrice).toBe('15.00');
   });
 
   it('most recent promotion wins', async () => {
@@ -3010,7 +3015,7 @@ export type CreatePromotionBody = z.infer<typeof createPromotionBody>;
 `apps/api/src/promotions/service.ts`:
 ```ts
 import { eq } from 'drizzle-orm';
-import { bumpCategory, bumpProduct, categories, products, promotions, type Redis } from '@modaco/core';
+import { bumpCategory, bumpVersions, categories, keys, products, promotions, type Redis } from '@modaco/core';
 import type { AppDeps } from '../deps';
 import { notFound, unprocessable } from '../errors';
 import type { CreatePromotionBody, Target } from './schemas';
@@ -3049,8 +3054,18 @@ export class PromotionService {
     const redis: Redis | null = this.deps.redis;
     if (!redis) return;
     const log = (msg: string, err: unknown) => this.deps.logger.error({ err }, msg);
-    if ('productId' in target) await bumpProduct(redis, target.productId, log);
-    else await bumpCategory(redis, target.categoryId, log);
+    if ('productId' in target) {
+      // A product-scoped promo changes that product's price and its position in category and
+      // all-products lists, so bump the product's category (and ver:all) as well.
+      const [p] = await this.deps.db.select({ categoryId: products.categoryId }).from(products).where(eq(products.id, target.productId));
+      await bumpVersions(redis, [
+        keys.productVersion(target.productId),
+        ...(p ? [keys.categoryVersion(p.categoryId)] : []),
+        keys.allVersion(),
+      ], log);
+    } else {
+      await bumpCategory(redis, target.categoryId, log);
+    }
   }
 
   async create(body: CreatePromotionBody): Promise<PromotionView> {
