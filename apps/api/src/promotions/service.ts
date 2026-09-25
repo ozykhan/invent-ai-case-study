@@ -1,5 +1,5 @@
-import { eq } from 'drizzle-orm';
-import { bumpCategory, bumpVersions, categories, keys, products, promotions, type Redis } from '@modaco/core';
+import { and, eq, isNull } from 'drizzle-orm';
+import { bumpCategory, bumpVersions, categories, keys, products, promotions, type DbOrTx, type Redis } from '@modaco/core';
 import type { AppDeps } from '../deps';
 import { notFound, unprocessable } from '../errors';
 import type { CreatePromotionBody, Target } from './schemas';
@@ -24,27 +24,33 @@ function toView(r: Row): PromotionView {
 export class PromotionService {
   constructor(private readonly deps: AppDeps) {}
 
-  private async assertTarget(target: Target): Promise<void> {
+  /**
+   * Validates the target exists and, for a product target, returns its category id — so callers
+   * that already need to touch the target row (create, assign) can pass that id straight to
+   * bump() instead of re-querying it after the write commits.
+   */
+  private async resolveTarget(db: DbOrTx, target: Target): Promise<number | undefined> {
     if ('productId' in target) {
-      const [p] = await this.deps.db.select({ id: products.id }).from(products).where(eq(products.id, target.productId));
+      const [p] = await db.select({ categoryId: products.categoryId }).from(products).where(eq(products.id, target.productId));
       if (!p) throw notFound(`product ${target.productId} not found`);
-    } else {
-      const [c] = await this.deps.db.select({ id: categories.id }).from(categories).where(eq(categories.id, target.categoryId));
-      if (!c) throw notFound(`category ${target.categoryId} not found`);
+      return p.categoryId;
     }
+    const [c] = await db.select({ id: categories.id }).from(categories).where(eq(categories.id, target.categoryId));
+    if (!c) throw notFound(`category ${target.categoryId} not found`);
+    return undefined;
   }
 
-  private async bump(target: Target): Promise<void> {
+  /** productCategoryId must be supplied by the caller for a product target; bump() never queries. */
+  private async bump(target: Target, productCategoryId?: number): Promise<void> {
     const redis: Redis | null = this.deps.redis;
     if (!redis) return;
     const log = (msg: string, err: unknown) => this.deps.logger.error({ err }, msg);
     if ('productId' in target) {
       // A product-scoped promo changes that product's price and its position in category and
       // all-products lists, so bump the product's category (and ver:all) as well.
-      const [p] = await this.deps.db.select({ categoryId: products.categoryId }).from(products).where(eq(products.id, target.productId));
       await bumpVersions(redis, [
         keys.productVersion(target.productId),
-        ...(p ? [keys.categoryVersion(p.categoryId)] : []),
+        ...(productCategoryId !== undefined ? [keys.categoryVersion(productCategoryId)] : []),
         keys.allVersion(),
       ], log);
     } else {
@@ -57,14 +63,16 @@ export class PromotionService {
     const endsAt = new Date(body.endsAt);
     if (endsAt <= startsAt) throw unprocessable('endsAt must be after startsAt');
     if (body.discountType === 'percentage' && Number(body.value) > 100) throw unprocessable('percentage value cannot exceed 100');
-    await this.assertTarget(body.target);
+    // Resolves the target and, for a product, its category id in one query, before the insert —
+    // so the write commits are followed only by the bump, never by another read.
+    const productCategoryId = await this.resolveTarget(this.deps.db, body.target);
     const [row] = await this.deps.db.insert(promotions).values({
       name: body.name, discountType: body.discountType, value: body.value, startsAt, endsAt,
       scope: 'productId' in body.target ? 'product' : 'category',
       productId: 'productId' in body.target ? body.target.productId : null,
       categoryId: 'categoryId' in body.target ? body.target.categoryId : null,
     }).returning();
-    await this.bump(body.target);
+    await this.bump(body.target, productCategoryId);
     return toView(row!);
   }
 
@@ -74,25 +82,54 @@ export class PromotionService {
   }
 
   async cancel(id: string): Promise<PromotionView | null> {
+    // A single conditional UPDATE, guarded by `cancelled_at is null`, makes this compare-and-set:
+    // of two concurrent cancels, Postgres row-level locking lets exactly one UPDATE actually flip
+    // cancelled_at and return a row: the other's WHERE clause no longer matches, so it returns none.
+    const [row] = await this.deps.db.update(promotions)
+      .set({ cancelledAt: this.deps.now() })
+      .where(and(eq(promotions.id, id), isNull(promotions.cancelledAt)))
+      .returning();
+    if (row) {
+      const view = toView(row);
+      // Only the winner of the race reaches here, so this runs at most once per actual
+      // cancellation. It's a query after the commit, but unlike create()'s insert this is safe to
+      // retry: a second cancel() call is a no-op (the guard above returns no row for it), so a
+      // failure here just leaves the category cache stale until its TTL — the same self-heal
+      // bumpVersions already relies on for a failed bump.
+      const productCategoryId = 'productId' in view.target
+        ? (await this.deps.db.select({ categoryId: products.categoryId }).from(products).where(eq(products.id, view.target.productId)))[0]?.categoryId
+        : undefined;
+      await this.bump(view.target, productCategoryId);
+      return view;
+    }
     const [existing] = await this.deps.db.select().from(promotions).where(eq(promotions.id, id));
-    if (!existing) return null;
-    if (existing.cancelledAt) return toView(existing);
-    const [row] = await this.deps.db.update(promotions).set({ cancelledAt: this.deps.now() }).where(eq(promotions.id, id)).returning();
-    await this.bump(toView(row!).target);
-    return toView(row!);
+    return existing ? toView(existing) : null;
   }
 
   async assign(id: string, target: Target): Promise<PromotionView | null> {
-    const [existing] = await this.deps.db.select().from(promotions).where(eq(promotions.id, id));
-    if (!existing) return null;
-    await this.assertTarget(target);
-    const [row] = await this.deps.db.update(promotions).set({
-      scope: 'productId' in target ? 'product' : 'category',
-      productId: 'productId' in target ? target.productId : null,
-      categoryId: 'categoryId' in target ? target.categoryId : null,
-    }).where(eq(promotions.id, id)).returning();
-    await this.bump(toView(existing).target);
-    await this.bump(target);
-    return toView(row!);
+    const result = await this.deps.db.transaction(async (tx) => {
+      // Lock the row so a concurrent assign can't read the same stale "old" target: with
+      // concurrent moves X->Y and X->Z, whichever transaction commits second must see the first
+      // transaction's write as its own "old" target, not the original X, or Y would never be
+      // invalidated. FOR UPDATE plus the transaction serializes the two around that read.
+      const [existing] = await tx.select().from(promotions).where(eq(promotions.id, id)).for('update');
+      if (!existing) return null;
+      const oldTarget = toView(existing).target;
+      const oldCategoryId = 'productId' in oldTarget
+        ? (await tx.select({ categoryId: products.categoryId }).from(products).where(eq(products.id, oldTarget.productId)))[0]?.categoryId
+        : undefined;
+      const newCategoryId = await this.resolveTarget(tx, target);
+      const [row] = await tx.update(promotions).set({
+        scope: 'productId' in target ? 'product' : 'category',
+        productId: 'productId' in target ? target.productId : null,
+        categoryId: 'categoryId' in target ? target.categoryId : null,
+      }).where(eq(promotions.id, id)).returning();
+      return { row: row!, oldTarget, oldCategoryId, newCategoryId };
+    });
+    if (!result) return null;
+    // Bumps happen after the transaction has committed, never inside it.
+    await this.bump(result.oldTarget, result.oldCategoryId);
+    await this.bump(target, result.newCategoryId);
+    return toView(result.row);
   }
 }

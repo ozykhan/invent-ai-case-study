@@ -2862,8 +2862,10 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ### Task 10: Promotion endpoints
 
 **Files:**
-- Create: `apps/api/src/promotions/schemas.ts`, `apps/api/src/promotions/service.ts`, `apps/api/src/promotions/routes.ts`, `apps/api/test/promotions.test.ts`
-- Modify: `apps/api/src/app.ts`
+- Create: `apps/api/src/promotions/schemas.ts`, `apps/api/src/promotions/service.ts`, `apps/api/src/promotions/routes.ts`, `apps/api/test/promotions.test.ts`, `apps/api/src/schemas.ts` (shared `moneyString` zod schema)
+- Modify: `apps/api/src/app.ts`, `apps/api/src/products/schemas.ts` (switch `basePrice` to the shared `moneyString`)
+
+**Fix round 1 (post-review):** cancel was read-then-write, letting two concurrent cancels both bump; fixed with a single conditional `UPDATE ... WHERE cancelled_at is null` (compare-and-set), bumping only when a row comes back. assign (`PUT /:id/target`) was also read-then-write, letting concurrent moves both read the same stale "old" target and lose a bump; fixed with `db.transaction` + `SELECT ... FOR UPDATE` to lock the row while capturing the old target, updating inside the transaction, and bumping both old and new targets only after it commits. The `value`/`basePrice` money regex allowed unlimited integer digits against a `numeric(12,2)` column (pg 22003 -> 500 on overflow); capped at 10 integer digits via a shared `moneyString` schema in `apps/api/src/schemas.ts`, used by both `products/schemas.ts` and `promotions/schemas.ts`. The product-scoped bump also ran a DB query after the insert commits (retry-unsafe alongside a duplicate-insert risk); `resolveTarget` now returns the product's category id from the pre-write validation query, so `bump()` never queries after a write it must be safe to retry.
 
 **Interfaces:**
 - Produces:
@@ -2940,6 +2942,7 @@ describe('POST /promotions', () => {
     expect((await request(ctx.app).post('/promotions').send(body({ target: { categoryId: 9999 } }))).status).toBe(404);
     expect((await request(ctx.app).post('/promotions').send(body({ target: {} }))).status).toBe(400);
     expect((await request(ctx.app).post('/promotions').send(body({ value: 'abc' }))).status).toBe(400);
+    expect((await request(ctx.app).post('/promotions').send(body({ value: '12345678901' }))).status).toBe(400); // 11 integer digits
   });
 });
 
@@ -2954,6 +2957,31 @@ describe('POST /promotions/:id/cancel', () => {
     expect(second.body.cancelledAt).toBe(first.body.cancelledAt);
     expect((await request(ctx.app).get(`/products/${belt.id}`)).body.effectivePrice).toBe('20.00');
     expect((await request(ctx.app).post('/promotions/00000000-0000-0000-0000-000000000000/cancel')).status).toBe(404);
+  });
+
+  it('a second cancel does not bump the category or all versions again', async () => {
+    const { body: promo } = await request(ctx.app).post('/promotions').send(body());
+    const afterCreate = { cat: await ctx.redis.get(keys.categoryVersion(acc.id)), all: await ctx.redis.get(keys.allVersion()) };
+    await request(ctx.app).post(`/promotions/${promo.id}/cancel`);
+    const afterFirst = { cat: await ctx.redis.get(keys.categoryVersion(acc.id)), all: await ctx.redis.get(keys.allVersion()) };
+    expect(afterFirst).not.toEqual(afterCreate);
+    await request(ctx.app).post(`/promotions/${promo.id}/cancel`);
+    const afterSecond = { cat: await ctx.redis.get(keys.categoryVersion(acc.id)), all: await ctx.redis.get(keys.allVersion()) };
+    expect(afterSecond).toEqual(afterFirst);
+  });
+
+  it('two concurrent cancels bump exactly once', async () => {
+    const { body: promo } = await request(ctx.app).post('/promotions').send(body());
+    const before = Number(await ctx.redis.get(keys.categoryVersion(acc.id)));
+    const [r1, r2] = await Promise.all([
+      request(ctx.app).post(`/promotions/${promo.id}/cancel`),
+      request(ctx.app).post(`/promotions/${promo.id}/cancel`),
+    ]);
+    expect(r1.status).toBe(200);
+    expect(r2.status).toBe(200);
+    expect(r1.body.cancelledAt).toBe(r2.body.cancelledAt);
+    const after = Number(await ctx.redis.get(keys.categoryVersion(acc.id)));
+    expect(after).toBe(before + 1);
   });
 });
 
@@ -2971,6 +2999,13 @@ describe('PUT /promotions/:id/target', () => {
     expect((await request(ctx.app).get(`/products/${boot.id}`)).body.effectivePrice).toBe('100.00');
     expect((await request(ctx.app).get(`/products/${belt.id}`)).body.effectivePrice).toBe('10.00');
   });
+
+  it('404s for an unknown promotion and an unknown target, 400s for an invalid body', async () => {
+    const { body: promo } = await request(ctx.app).post('/promotions').send(body());
+    expect((await request(ctx.app).put('/promotions/00000000-0000-0000-0000-000000000000/target').send({ categoryId: shoes.id })).status).toBe(404);
+    expect((await request(ctx.app).put(`/promotions/${promo.id}/target`).send({ categoryId: 9999 })).status).toBe(404);
+    expect((await request(ctx.app).put(`/promotions/${promo.id}/target`).send({})).status).toBe(400);
+  });
 });
 
 describe('GET /promotions/:id', () => {
@@ -2978,6 +3013,7 @@ describe('GET /promotions/:id', () => {
     const { body: promo } = await request(ctx.app).post('/promotions').send(body());
     expect((await request(ctx.app).get(`/promotions/${promo.id}`)).body.id).toBe(promo.id);
     expect((await request(ctx.app).get('/promotions/not-a-uuid')).status).toBe(400);
+    expect((await request(ctx.app).get('/promotions/00000000-0000-0000-0000-000000000000')).status).toBe(404);
   });
 });
 ```
@@ -2989,9 +3025,24 @@ Expected: FAIL with 404s.
 
 - [ ] **Step 3: Implement schemas and service**
 
+`apps/api/src/schemas.ts` (shared across `products` and `promotions`):
+```ts
+import { z } from 'zod';
+
+/**
+ * A monetary amount as sent/received in JSON: a decimal string with up to 2 places, capped at
+ * 10 integer digits so it always fits a `numeric(12,2)` column (12 total digits, 2 reserved for
+ * the fraction) — an unbounded integer part would otherwise let a huge value hit Postgres error
+ * 22003 (numeric field overflow) and surface as a 500 instead of a validation error.
+ */
+export const moneyString = (label: string) =>
+  z.string().regex(/^\d{1,10}(\.\d{1,2})?$/, `${label} must be a decimal with up to 2 places and at most 10 integer digits`);
+```
+
 `apps/api/src/promotions/schemas.ts`:
 ```ts
 import { z } from 'zod';
+import { moneyString } from '../schemas';
 
 export const promotionIdParam = z.object({ id: z.string().uuid() });
 
@@ -3004,7 +3055,7 @@ export type Target = z.infer<typeof targetSchema>;
 export const createPromotionBody = z.object({
   name: z.string().trim().min(1).max(255),
   discountType: z.enum(['percentage', 'fixed']),
-  value: z.string().regex(/^\d+(\.\d{1,2})?$/, 'value must be a decimal with up to 2 places'),
+  value: moneyString('value'),
   startsAt: z.string().datetime({ offset: true }),
   endsAt: z.string().datetime({ offset: true }),
   target: targetSchema,
@@ -3012,10 +3063,12 @@ export const createPromotionBody = z.object({
 export type CreatePromotionBody = z.infer<typeof createPromotionBody>;
 ```
 
+`apps/api/src/products/schemas.ts` now imports the same `moneyString('basePrice')` in place of its own inline regex (unlimited-digit money strings hit the same pg 22003 overflow).
+
 `apps/api/src/promotions/service.ts`:
 ```ts
-import { eq } from 'drizzle-orm';
-import { bumpCategory, bumpVersions, categories, keys, products, promotions, type Redis } from '@modaco/core';
+import { and, eq, isNull } from 'drizzle-orm';
+import { bumpCategory, bumpVersions, categories, keys, products, promotions, type DbOrTx, type Redis } from '@modaco/core';
 import type { AppDeps } from '../deps';
 import { notFound, unprocessable } from '../errors';
 import type { CreatePromotionBody, Target } from './schemas';
@@ -3040,27 +3093,33 @@ function toView(r: Row): PromotionView {
 export class PromotionService {
   constructor(private readonly deps: AppDeps) {}
 
-  private async assertTarget(target: Target): Promise<void> {
+  /**
+   * Validates the target exists and, for a product target, returns its category id — so callers
+   * that already need to touch the target row (create, assign) can pass that id straight to
+   * bump() instead of re-querying it after the write commits.
+   */
+  private async resolveTarget(db: DbOrTx, target: Target): Promise<number | undefined> {
     if ('productId' in target) {
-      const [p] = await this.deps.db.select({ id: products.id }).from(products).where(eq(products.id, target.productId));
+      const [p] = await db.select({ categoryId: products.categoryId }).from(products).where(eq(products.id, target.productId));
       if (!p) throw notFound(`product ${target.productId} not found`);
-    } else {
-      const [c] = await this.deps.db.select({ id: categories.id }).from(categories).where(eq(categories.id, target.categoryId));
-      if (!c) throw notFound(`category ${target.categoryId} not found`);
+      return p.categoryId;
     }
+    const [c] = await db.select({ id: categories.id }).from(categories).where(eq(categories.id, target.categoryId));
+    if (!c) throw notFound(`category ${target.categoryId} not found`);
+    return undefined;
   }
 
-  private async bump(target: Target): Promise<void> {
+  /** productCategoryId must be supplied by the caller for a product target; bump() never queries. */
+  private async bump(target: Target, productCategoryId?: number): Promise<void> {
     const redis: Redis | null = this.deps.redis;
     if (!redis) return;
     const log = (msg: string, err: unknown) => this.deps.logger.error({ err }, msg);
     if ('productId' in target) {
       // A product-scoped promo changes that product's price and its position in category and
       // all-products lists, so bump the product's category (and ver:all) as well.
-      const [p] = await this.deps.db.select({ categoryId: products.categoryId }).from(products).where(eq(products.id, target.productId));
       await bumpVersions(redis, [
         keys.productVersion(target.productId),
-        ...(p ? [keys.categoryVersion(p.categoryId)] : []),
+        ...(productCategoryId !== undefined ? [keys.categoryVersion(productCategoryId)] : []),
         keys.allVersion(),
       ], log);
     } else {
@@ -3073,14 +3132,16 @@ export class PromotionService {
     const endsAt = new Date(body.endsAt);
     if (endsAt <= startsAt) throw unprocessable('endsAt must be after startsAt');
     if (body.discountType === 'percentage' && Number(body.value) > 100) throw unprocessable('percentage value cannot exceed 100');
-    await this.assertTarget(body.target);
+    // Resolves the target and, for a product, its category id in one query, before the insert —
+    // so the write commits are followed only by the bump, never by another read.
+    const productCategoryId = await this.resolveTarget(this.deps.db, body.target);
     const [row] = await this.deps.db.insert(promotions).values({
       name: body.name, discountType: body.discountType, value: body.value, startsAt, endsAt,
       scope: 'productId' in body.target ? 'product' : 'category',
       productId: 'productId' in body.target ? body.target.productId : null,
       categoryId: 'categoryId' in body.target ? body.target.categoryId : null,
     }).returning();
-    await this.bump(body.target);
+    await this.bump(body.target, productCategoryId);
     return toView(row!);
   }
 
@@ -3090,26 +3151,55 @@ export class PromotionService {
   }
 
   async cancel(id: string): Promise<PromotionView | null> {
+    // A single conditional UPDATE, guarded by `cancelled_at is null`, makes this compare-and-set:
+    // of two concurrent cancels, Postgres row-level locking lets exactly one UPDATE actually flip
+    // cancelled_at and return a row: the other's WHERE clause no longer matches, so it returns none.
+    const [row] = await this.deps.db.update(promotions)
+      .set({ cancelledAt: this.deps.now() })
+      .where(and(eq(promotions.id, id), isNull(promotions.cancelledAt)))
+      .returning();
+    if (row) {
+      const view = toView(row);
+      // Only the winner of the race reaches here, so this runs at most once per actual
+      // cancellation. It's a query after the commit, but unlike create()'s insert this is safe to
+      // retry: a second cancel() call is a no-op (the guard above returns no row for it), so a
+      // failure here just leaves the category cache stale until its TTL — the same self-heal
+      // bumpVersions already relies on for a failed bump.
+      const productCategoryId = 'productId' in view.target
+        ? (await this.deps.db.select({ categoryId: products.categoryId }).from(products).where(eq(products.id, view.target.productId)))[0]?.categoryId
+        : undefined;
+      await this.bump(view.target, productCategoryId);
+      return view;
+    }
     const [existing] = await this.deps.db.select().from(promotions).where(eq(promotions.id, id));
-    if (!existing) return null;
-    if (existing.cancelledAt) return toView(existing);
-    const [row] = await this.deps.db.update(promotions).set({ cancelledAt: this.deps.now() }).where(eq(promotions.id, id)).returning();
-    await this.bump(toView(row!).target);
-    return toView(row!);
+    return existing ? toView(existing) : null;
   }
 
   async assign(id: string, target: Target): Promise<PromotionView | null> {
-    const [existing] = await this.deps.db.select().from(promotions).where(eq(promotions.id, id));
-    if (!existing) return null;
-    await this.assertTarget(target);
-    const [row] = await this.deps.db.update(promotions).set({
-      scope: 'productId' in target ? 'product' : 'category',
-      productId: 'productId' in target ? target.productId : null,
-      categoryId: 'categoryId' in target ? target.categoryId : null,
-    }).where(eq(promotions.id, id)).returning();
-    await this.bump(toView(existing).target);
-    await this.bump(target);
-    return toView(row!);
+    const result = await this.deps.db.transaction(async (tx) => {
+      // Lock the row so a concurrent assign can't read the same stale "old" target: with
+      // concurrent moves X->Y and X->Z, whichever transaction commits second must see the first
+      // transaction's write as its own "old" target, not the original X, or Y would never be
+      // invalidated. FOR UPDATE plus the transaction serializes the two around that read.
+      const [existing] = await tx.select().from(promotions).where(eq(promotions.id, id)).for('update');
+      if (!existing) return null;
+      const oldTarget = toView(existing).target;
+      const oldCategoryId = 'productId' in oldTarget
+        ? (await tx.select({ categoryId: products.categoryId }).from(products).where(eq(products.id, oldTarget.productId)))[0]?.categoryId
+        : undefined;
+      const newCategoryId = await this.resolveTarget(tx, target);
+      const [row] = await tx.update(promotions).set({
+        scope: 'productId' in target ? 'product' : 'category',
+        productId: 'productId' in target ? target.productId : null,
+        categoryId: 'categoryId' in target ? target.categoryId : null,
+      }).where(eq(promotions.id, id)).returning();
+      return { row: row!, oldTarget, oldCategoryId, newCategoryId };
+    });
+    if (!result) return null;
+    // Bumps happen after the transaction has committed, never inside it.
+    await this.bump(result.oldTarget, result.oldCategoryId);
+    await this.bump(target, result.newCategoryId);
+    return toView(result.row);
   }
 }
 ```

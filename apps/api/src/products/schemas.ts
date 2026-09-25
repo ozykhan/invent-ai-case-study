@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { moneyString } from '../schemas';
 
 export const idParam = z.object({ id: z.coerce.number().int().positive() });
 
@@ -14,7 +15,7 @@ export const createProductBody = z.object({
   sku: z.string().trim().min(1).max(64),
   name: z.string().trim().min(1).max(255),
   categoryId: z.number().int().positive(),
-  basePrice: z.string().regex(/^\d+(\.\d{1,2})?$/, 'basePrice must be a decimal with up to 2 places'),
+  basePrice: moneyString('basePrice'),
   stock: z.number().int().min(0).default(0),
 });
 export type CreateProductBody = z.infer<typeof createProductBody>;

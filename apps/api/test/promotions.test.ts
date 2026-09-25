@@ -63,6 +63,7 @@ describe('POST /promotions', () => {
     expect((await request(ctx.app).post('/promotions').send(body({ target: { categoryId: 9999 } }))).status).toBe(404);
     expect((await request(ctx.app).post('/promotions').send(body({ target: {} }))).status).toBe(400);
     expect((await request(ctx.app).post('/promotions').send(body({ value: 'abc' }))).status).toBe(400);
+    expect((await request(ctx.app).post('/promotions').send(body({ value: '12345678901' }))).status).toBe(400); // 11 integer digits
   });
 });
 
@@ -77,6 +78,31 @@ describe('POST /promotions/:id/cancel', () => {
     expect(second.body.cancelledAt).toBe(first.body.cancelledAt);
     expect((await request(ctx.app).get(`/products/${belt.id}`)).body.effectivePrice).toBe('20.00');
     expect((await request(ctx.app).post('/promotions/00000000-0000-0000-0000-000000000000/cancel')).status).toBe(404);
+  });
+
+  it('a second cancel does not bump the category or all versions again', async () => {
+    const { body: promo } = await request(ctx.app).post('/promotions').send(body());
+    const afterCreate = { cat: await ctx.redis.get(keys.categoryVersion(acc.id)), all: await ctx.redis.get(keys.allVersion()) };
+    await request(ctx.app).post(`/promotions/${promo.id}/cancel`);
+    const afterFirst = { cat: await ctx.redis.get(keys.categoryVersion(acc.id)), all: await ctx.redis.get(keys.allVersion()) };
+    expect(afterFirst).not.toEqual(afterCreate);
+    await request(ctx.app).post(`/promotions/${promo.id}/cancel`);
+    const afterSecond = { cat: await ctx.redis.get(keys.categoryVersion(acc.id)), all: await ctx.redis.get(keys.allVersion()) };
+    expect(afterSecond).toEqual(afterFirst);
+  });
+
+  it('two concurrent cancels bump exactly once', async () => {
+    const { body: promo } = await request(ctx.app).post('/promotions').send(body());
+    const before = Number(await ctx.redis.get(keys.categoryVersion(acc.id)));
+    const [r1, r2] = await Promise.all([
+      request(ctx.app).post(`/promotions/${promo.id}/cancel`),
+      request(ctx.app).post(`/promotions/${promo.id}/cancel`),
+    ]);
+    expect(r1.status).toBe(200);
+    expect(r2.status).toBe(200);
+    expect(r1.body.cancelledAt).toBe(r2.body.cancelledAt);
+    const after = Number(await ctx.redis.get(keys.categoryVersion(acc.id)));
+    expect(after).toBe(before + 1);
   });
 });
 
@@ -94,6 +120,13 @@ describe('PUT /promotions/:id/target', () => {
     expect((await request(ctx.app).get(`/products/${boot.id}`)).body.effectivePrice).toBe('100.00');
     expect((await request(ctx.app).get(`/products/${belt.id}`)).body.effectivePrice).toBe('10.00');
   });
+
+  it('404s for an unknown promotion and an unknown target, 400s for an invalid body', async () => {
+    const { body: promo } = await request(ctx.app).post('/promotions').send(body());
+    expect((await request(ctx.app).put('/promotions/00000000-0000-0000-0000-000000000000/target').send({ categoryId: shoes.id })).status).toBe(404);
+    expect((await request(ctx.app).put(`/promotions/${promo.id}/target`).send({ categoryId: 9999 })).status).toBe(404);
+    expect((await request(ctx.app).put(`/promotions/${promo.id}/target`).send({})).status).toBe(400);
+  });
 });
 
 describe('GET /promotions/:id', () => {
@@ -101,5 +134,6 @@ describe('GET /promotions/:id', () => {
     const { body: promo } = await request(ctx.app).post('/promotions').send(body());
     expect((await request(ctx.app).get(`/promotions/${promo.id}`)).body.id).toBe(promo.id);
     expect((await request(ctx.app).get('/promotions/not-a-uuid')).status).toBe(400);
+    expect((await request(ctx.app).get('/promotions/00000000-0000-0000-0000-000000000000')).status).toBe(404);
   });
 });
