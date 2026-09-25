@@ -49,7 +49,6 @@ export function scheduledOffsetMs(k: number, ratePerSec: number, rampMs: number)
   return rampMs + (k - rampCount) / perMs;
 }
 
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const yieldToIo = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 /**
@@ -63,6 +62,21 @@ export async function runPhase(transport: Transport, source: LoadSource, rng: Rn
   const aborted = () => opts.signal?.aborted === true;
   const start = performance.now();
   const deadline = start + opts.durationMs;
+
+  // A single abort promise shared by both models, so a wait is never longer than the time to abort. `abortedAt`
+  // records the moment the signal actually fired, for an accurate `elapsedSeconds` on an interrupted phase.
+  let abortedAt: number | undefined = aborted() ? start : undefined;
+  let resolveAbort!: () => void;
+  const onAbort = new Promise<void>((resolve) => { resolveAbort = resolve; });
+  const onAbortHandler = () => { abortedAt = performance.now(); resolveAbort(); };
+  if (aborted()) resolveAbort();
+  else opts.signal?.addEventListener('abort', onAbortHandler, { once: true });
+
+  /** Sleeps `ms`, but resolves early - clearing its timer - if the phase aborts first. */
+  const sleepOrAbort = (ms: number): Promise<void> => new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    void onAbort.then(() => { clearTimeout(timer); resolve(); });
+  });
 
   const issue = (spec: RequestSpec, t0: number): Promise<void> => {
     const done: Promise<void> = transport.send(spec).then(
@@ -101,7 +115,7 @@ export async function runPhase(transport: Transport, source: LoadSource, rng: Rn
         const next = scheduledOffsetMs(k, rate, rampMs);
         if (next >= opts.durationMs) break;
         const wait = start + next - performance.now();
-        if (wait >= 1) { await sleep(wait); continue; }
+        if (wait >= 1) { await sleepOrAbort(wait); continue; }
         // Fire everything that is due, including requests that fell behind during a stall.
         const now = performance.now() - start;
         for (let t = next; t <= now && t < opts.durationMs; t = scheduledOffsetMs(k, rate, rampMs)) {
@@ -110,25 +124,24 @@ export async function runPhase(transport: Transport, source: LoadSource, rng: Rn
         }
         await yieldToIo();
       }
-      const rest = deadline - performance.now();
-      if (rest > 0 && !aborted()) await sleep(rest);
+      if (!aborted()) {
+        const rest = deadline - performance.now();
+        if (rest > 0) await sleepOrAbort(rest);
+      }
     } else {
       const worker = async () => {
         while (!aborted() && performance.now() < deadline) await issue(source.next(rng), performance.now());
       };
       const workers = Promise.all(Array.from({ length: opts.model.concurrency }, worker));
-      const onAbort = new Promise<void>((resolve) => {
-        if (aborted()) resolve();
-        else opts.signal?.addEventListener('abort', () => resolve(), { once: true });
-      });
       await Promise.race([workers, onAbort]);
     }
   } finally {
     clearInterval(timer);
+    opts.signal?.removeEventListener('abort', onAbortHandler);
   }
 
-  const stoppedAt = Math.min(performance.now(), deadline);
   const interrupted = aborted();
+  const stoppedAt = interrupted ? (abortedAt ?? performance.now()) : Math.min(performance.now(), deadline);
   const drain = Promise.allSettled([...inflight]);
   if (interrupted) {
     let grace: NodeJS.Timeout | undefined;

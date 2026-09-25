@@ -91,6 +91,16 @@ describe('runPhase', () => {
     expect(performance.now() - started).toBeLessThan(1000);
   });
 
+  it('stops early when the signal aborts during a long ramp in the open model', async () => {
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 50);
+    const started = performance.now();
+    const out = await runPhase(delayed(5), source, createRng(1), new Metrics(), { model: { kind: 'open', rate: 50, rampMs: 30_000, maxInflight: 10_000 }, durationMs: 60_000, signal: ac.signal });
+    expect(out.interrupted).toBe(true);
+    expect(performance.now() - started).toBeLessThan(200);
+    expect(out.elapsedSeconds).toBeLessThan(0.2);
+  });
+
   it('records transport errors by kind and hands parsed bodies to onResponse', async () => {
     let n = 0;
     const seen: Array<[number, unknown]> = [];
