@@ -1,23 +1,34 @@
-import { SendMessageCommand } from '@aws-sdk/client-sqs';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { CreateQueueCommand, DeleteQueueCommand, SendMessageCommand } from '@aws-sdk/client-sqs';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { pollOnce, sqsEventFrom } from '../src/queue';
 import { setupIngestTest, type IngestTestContext } from './helpers';
 
 let ctx: IngestTestContext;
-beforeAll(async () => { ctx = await setupIngestTest(); });
-afterAll(() => ctx.close());
-beforeEach(() => ctx.drainQueue(ctx.deps.config.dlqUrl));
+// A dedicated, ephemeral queue rather than the shared real DLQ: this test intentionally leaves a message
+// stuck invisible (to prove a failed handler doesn't delete it), and the shared DLQ is used by other tests
+// and the runner smoke test, so reusing it would leave stray messages behind for them to trip over.
+let testQueueUrl: string;
+
+beforeAll(async () => {
+  ctx = await setupIngestTest();
+  const created = await ctx.deps.sqs.send(new CreateQueueCommand({ QueueName: `modaco-test-poll-${Date.now()}-${Math.random().toString(36).slice(2)}` }));
+  testQueueUrl = created.QueueUrl!;
+});
+
+afterAll(async () => {
+  await ctx.deps.sqs.send(new DeleteQueueCommand({ QueueUrl: testQueueUrl })).catch(() => {});
+  await ctx.close();
+});
 
 describe('pollOnce', () => {
   it('deletes handled messages and leaves failed ones for redelivery', async () => {
-    const url = ctx.deps.config.dlqUrl; // any queue without consumers works for this test
-    await ctx.deps.sqs.send(new SendMessageCommand({ QueueUrl: url, MessageBody: 'ok' }));
-    await ctx.deps.sqs.send(new SendMessageCommand({ QueueUrl: url, MessageBody: 'fail' }));
+    await ctx.deps.sqs.send(new SendMessageCommand({ QueueUrl: testQueueUrl, MessageBody: 'ok' }));
+    await ctx.deps.sqs.send(new SendMessageCommand({ QueueUrl: testQueueUrl, MessageBody: 'fail' }));
     const seen: string[] = [];
-    const r = await pollOnce(ctx.deps.sqs, url, async (m) => { seen.push(m.Body!); if (m.Body === 'fail') throw new Error('nope'); }, { waitSeconds: 1 });
+    const r = await pollOnce(ctx.deps.sqs, testQueueUrl, async (m) => { seen.push(m.Body!); if (m.Body === 'fail') throw new Error('nope'); }, { waitSeconds: 1 });
     expect(seen.sort()).toEqual(['fail', 'ok']);
     expect(r).toEqual({ received: 2, succeeded: 1, failed: 1 });
-    const empty = await pollOnce(ctx.deps.sqs, url, async () => {}, { waitSeconds: 1 });
+    const empty = await pollOnce(ctx.deps.sqs, testQueueUrl, async () => {}, { waitSeconds: 1 });
     expect(empty.received).toBe(0); // 'fail' is invisible until its visibility timeout elapses
   });
 

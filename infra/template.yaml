@@ -75,6 +75,8 @@ Resources:
           Properties:
             Queue: !GetAtt ChunkQueue.Arn
             BatchSize: 1
+            ScalingConfig:
+              MaximumConcurrency: !Ref WorkerReservedConcurrency
 
   DeadLetterFunction:
     Type: AWS::Serverless::Function
