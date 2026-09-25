@@ -1,3 +1,4 @@
+import { hostname } from 'node:os';
 import { z } from 'zod';
 
 const schema = z.object({
@@ -8,6 +9,7 @@ const schema = z.object({
   S3_PUBLIC_ENDPOINT: z.string().default('http://localhost:4566'),
   S3_BUCKET: z.string().default('modaco-vendor-uploads'),
   LOG_LEVEL: z.string().default('info'),
+  INSTANCE_ID: z.string().min(1).optional(),
 });
 
 export interface Config {
@@ -18,6 +20,8 @@ export interface Config {
   s3PublicEndpoint: string;
   s3Bucket: string;
   logLevel: string;
+  /** Sent as X-Instance-Id. In Docker the hostname is the container id, unique per replica. */
+  instanceId: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -25,5 +29,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
     port: e.PORT, databaseUrl: e.DATABASE_URL, redisUrl: e.REDIS_URL, awsRegion: e.AWS_REGION,
     s3PublicEndpoint: e.S3_PUBLIC_ENDPOINT, s3Bucket: e.S3_BUCKET, logLevel: e.LOG_LEVEL,
+    instanceId: e.INSTANCE_ID ?? hostname(),
   };
 }

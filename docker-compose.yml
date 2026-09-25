@@ -1,3 +1,21 @@
+# Shared by the single "api" service (profile app, port 3000) and the scalable "api-lb" service (profile lb).
+x-api: &api
+  build: .
+  command: pnpm --filter @modaco/api start
+  environment:
+    PORT: 3000
+    DATABASE_URL: postgres://modaco:modaco@postgres:5432/modaco
+    REDIS_URL: redis://redis:6379
+    AWS_REGION: us-east-1
+    AWS_ACCESS_KEY_ID: test
+    AWS_SECRET_ACCESS_KEY: test
+    S3_PUBLIC_ENDPOINT: http://localhost:4566
+    S3_BUCKET: modaco-vendor-uploads
+  depends_on:
+    postgres: { condition: service_healthy }
+    redis: { condition: service_healthy }
+    localstack: { condition: service_healthy }
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -36,23 +54,28 @@ services:
       retries: 30
 
   api:
+    <<: *api
     profiles: ["app"]
-    build: .
-    command: pnpm --filter @modaco/api start
-    environment:
-      PORT: 3000
-      DATABASE_URL: postgres://modaco:modaco@postgres:5432/modaco
-      REDIS_URL: redis://redis:6379
-      AWS_REGION: us-east-1
-      AWS_ACCESS_KEY_ID: test
-      AWS_SECRET_ACCESS_KEY: test
-      S3_PUBLIC_ENDPOINT: http://localhost:4566
-      S3_BUCKET: modaco-vendor-uploads
     ports: ["3000:3000"]
+
+  # Scalable replicas behind nginx: docker compose --profile lb up --build -d --scale api-lb=4
+  # No host port, so replicas do not collide. The CPU limit makes each replica one unit of capacity.
+  api-lb:
+    <<: *api
+    profiles: ["lb"]
+    deploy:
+      resources:
+        limits:
+          cpus: "${API_CPUS:-1}"
+
+  nginx:
+    profiles: ["lb"]
+    image: nginx:1.27-alpine
+    ports: ["8080:80"]
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
-      postgres: { condition: service_healthy }
-      redis: { condition: service_healthy }
-      localstack: { condition: service_healthy }
+      - api-lb
 
   runner:
     profiles: ["app"]
