@@ -17,7 +17,8 @@
     "seed": "tsx scripts/seed.ts",
     "vendor-file": "tsx scripts/generate-vendor-file.ts",
     "demo:ingest": "tsx scripts/demo-ingest.ts",
-    "demo:flash-sale": "tsx scripts/demo-flash-sale.ts"
+    "demo:flash-sale": "tsx scripts/demo-flash-sale.ts",
+    "modaco": "tsx apps/cli/src/main.ts"
   },
   "dependencies": {
     "@modaco/core": "workspace:*"
