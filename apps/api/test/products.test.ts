@@ -1,9 +1,10 @@
-import { createRedis, keys } from '@modaco/core';
+import { createRedis, keys, STOCK_TTL_SECONDS } from '@modaco/core';
 import { promotions } from '@modaco/core';
 import type { Express } from 'express';
 import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app';
+import { loadStocks } from '../src/products/stock';
 import { setupTestDeps, type TestContext } from './helpers';
 
 let ctx: TestContext;
@@ -165,6 +166,42 @@ describe('PATCH /products/:id/stock', () => {
   it('refuses to go negative and 404s on unknown ids', async () => {
     expect((await request(ctx.app).patch(`/products/${hat.id}/stock`).send({ delta: -1 })).status).toBe(422);
     expect((await request(ctx.app).patch('/products/999999/stock').send({ delta: 1 })).status).toBe(404);
+  });
+});
+
+describe('stock counters', () => {
+  it('expire on the same 300 s bound as the cache versions', async () => {
+    expect(STOCK_TTL_SECONDS).toBe(300);
+    await request(ctx.app).get(`/products/${belt.id}`); // backfill after a miss
+    let ttl = await ctx.redis.ttl(keys.stock(belt.id));
+    expect(ttl).toBeGreaterThan(0);
+    expect(ttl).toBeLessThanOrEqual(300);
+    await request(ctx.app).patch(`/products/${belt.id}/stock`).send({ delta: 1 }); // write-through
+    ttl = await ctx.redis.ttl(keys.stock(belt.id));
+    expect(ttl).toBeGreaterThan(0);
+    expect(ttl).toBeLessThanOrEqual(300);
+  });
+
+  it('a backfill after a miss never overwrites a counter a concurrent write set in the meantime', async () => {
+    // The MGET misses; before the backfill lands, a PATCH commits and writes the newer value 99.
+    const mget = vi.spyOn(ctx.redis, 'mget').mockImplementationOnce((async () => {
+      await ctx.redis.set(keys.stock(belt.id), '99');
+      return [null];
+    }) as never);
+    const stocks = await loadStocks(ctx.deps, [belt.id]);
+    mget.mockRestore();
+    expect(stocks.get(belt.id)).toBe(3); // this read serves what it saw in postgres...
+    expect(await ctx.redis.get(keys.stock(belt.id))).toBe('99'); // ...but must not clobber the newer counter
+  });
+
+  it('drops the counter when a write-through SET fails, so the next read falls back to postgres', async () => {
+    await request(ctx.app).get(`/products/${belt.id}`); // stock:{id} = 3
+    const set = vi.spyOn(ctx.redis, 'set').mockRejectedValueOnce(new Error('transient'));
+    const res = await request(ctx.app).patch(`/products/${belt.id}/stock`).send({ delta: -2 });
+    set.mockRestore();
+    expect(res.body).toEqual({ id: belt.id, stock: 1 });
+    expect(await ctx.redis.get(keys.stock(belt.id))).toBeNull();
+    expect((await request(ctx.app).get(`/products/${belt.id}`)).body.stock).toBe(1);
   });
 });
 

@@ -1,7 +1,7 @@
 import { eq, sql } from 'drizzle-orm';
 import { Readable } from 'node:stream';
 import { categories, computeChunks, ingestionChunks, ingestionJobs, ingestionRejections, keys, products } from '@modaco/core';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { markChunkFailed } from '../src/job-state';
 import { processChunk } from '../src/worker';
 import { setupIngestTest, type IngestTestContext } from './helpers';
@@ -282,6 +282,18 @@ describe('processChunk', () => {
     await expect(processChunk({ ...ctx.deps, s3 }, { jobId, ...chunks[0]! })).rejects.toThrow(/short read/);
     expect(await ctx.deps.db.select().from(products)).toHaveLength(0);
     expect(await ctx.deps.db.select().from(ingestionRejections)).toHaveLength(0);
+  });
+
+  it('drops stock counters it failed to overwrite, so reads fall back to postgres instead of a stale value', async () => {
+    const [shoes] = await ctx.deps.db.insert(categories).values({ name: 'Shoes', slug: 'shoes' }).returning();
+    const [boot] = await ctx.deps.db.insert(products).values({ sku: 'S3', name: 'Boot', categoryId: shoes!.id, basePrice: '10.00', stock: 1 }).returning();
+    await ctx.deps.redis.set(keys.stock(boot!.id), '1');
+    const failingPipeline = { set() { return failingPipeline; }, exec: async () => { throw new Error('transient'); } };
+    const pipeline = vi.spyOn(ctx.deps.redis, 'pipeline').mockReturnValueOnce(failingPipeline as never);
+    const { jobId, chunks } = await prepare('sku,name,category,vendor_price,stock\nS3,Boot,Shoes,50.00,7\n', 10_000);
+    await processChunk(ctx.deps, { jobId, ...chunks[0]! });
+    pipeline.mockRestore();
+    expect(await ctx.deps.redis.get(keys.stock(boot!.id))).toBeNull();
   });
 
   it('markChunkFailed fails the job once and ignores completed chunks', async () => {

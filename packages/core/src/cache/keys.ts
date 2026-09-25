@@ -1,7 +1,11 @@
 import type { SortDir } from '../products/queries';
 
 export const DEFAULT_TTL_SECONDS = 300;
-export const STOCK_TTL_SECONDS = 86_400;
+/**
+ * Stock counters self-heal on the same bound as cache entries: concurrent write-throughs can land in
+ * Redis out of commit order, and this TTL caps how long such a counter can disagree with Postgres.
+ */
+export const STOCK_TTL_SECONDS = 300;
 export const SLUG_TTL_SECONDS = 300;
 
 export const keys = {

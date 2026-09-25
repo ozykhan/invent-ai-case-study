@@ -186,7 +186,12 @@ class BatchWriter {
     if (written.length > 0) {
       const pipe = this.redis.pipeline();
       for (const w of written) pipe.set(keys.stock(w.id), String(w.stock), 'EX', STOCK_TTL_SECONDS);
-      await pipe.exec().then(throwOnPipelineError).catch((err) => log('stock counter publish failed', err));
+      await pipe.exec().then(throwOnPipelineError).catch(async (err) => {
+        // A counter that missed this write would keep serving the old stock; drop them all (best effort)
+        // so reads fall back to Postgres, and failing that the TTL bounds the staleness.
+        log('stock counter publish failed; dropping the counters', err);
+        await this.redis.del(...written.map((w) => keys.stock(w.id))).catch((delErr) => log('stock counter delete failed; stale until TTL', delErr));
+      });
     }
     if (categoryIds.length > 0) {
       await bumpVersions(this.redis, [...categoryIds.map(keys.categoryVersion), keys.allVersion()], log);
