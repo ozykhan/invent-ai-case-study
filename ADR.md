@@ -274,7 +274,7 @@ Percentiles are the means of the three runs; ranges and per-run values are in th
 - **An open-model load on a cold cache collapsed and did not recover.** Two attempts at 4,900 req/s against 4 replicas, starting from an empty cache (one of them with a 30 s ramp), both collapsed:
   - Postgres ran at 5 to 6 CPUs on 40 concurrent listing builds (four pools of 10), with 10,000 requests in flight and nginx out of worker connections. More than 46k requests timed out.
   - Postgres was still busy 5 minutes after the client stopped, until the replicas were restarted.
-  - A cold 62k-product page takes 220 to 240 ms to build, which is longer than the 200 ms coalescing wait (§4). So every concurrent reader of a cold page runs its own query.
+  - On an idle stack, a cold 62k-product page takes about 170 to 220 ms to build (`cold-page-build.txt` in the rerun folder), close to the 200 ms coalescing wait (§4). Under load, 40 concurrent builds on 6 CPUs push each build past 200 ms, so waiting readers fall through and run their own query, which adds more load. This feedback loop is our reading of the CPU and latency captures; build times under load were not instrumented.
   - The closed-model runs survived the same cold start because they never had more than 100 requests in flight.
   - The collapse was not reproduced with 1 replica, and no fix was tested.
 - **Also checked end to end.**

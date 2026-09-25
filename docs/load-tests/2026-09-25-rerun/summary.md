@@ -30,9 +30,11 @@ used more than 0.5% CPU inside a recorded window:
 
 ## Method and exact commands
 
-The base infra (Postgres on 5433, Redis, LocalStack) was already running as Compose project `modaco-api`, whose working
-directory no longer exists. So the replicas joined that project's network through `-p modaco-api` and `--no-deps`,
-which leaves the running Postgres, Redis and LocalStack alone. Apart from that, these are the README commands.
+The base infra (Postgres on 5433, Redis, LocalStack) was already running as Compose project `modaco-api`, started from
+another checkout. At the time the compose project name came from the checkout's directory, so these runs passed
+`-p modaco-api` to join that project, and `--no-deps` to leave the running Postgres, Redis and LocalStack alone.
+`docker-compose.yml` now pins `name: modaco-api`, so the plain README commands attach to the same project from any
+checkout and `-p modaco-api` is no longer needed. The commands below are shown without it.
 
 Catalog (once):
 
@@ -47,9 +49,9 @@ pnpm demo:ingest tmp/vendor-500k.csv         # completed: 9/9 chunks, 499,479 ro
 Before each run (to switch or re-check the replica count):
 
 ```bash
-docker compose -p modaco-api --profile lb up -d --no-deps --scale api-lb=N api-lb nginx   # image built once with --build
+docker compose --profile lb up -d --no-deps --scale api-lb=N api-lb nginx   # image built once with --build
 # wait until every replica answers GET /health itself (docker exec <replica> node -e "fetch('http://localhost:3000/health')...")
-docker compose -p modaco-api restart nginx                                               # nginx resolves replicas at startup
+docker compose restart nginx                                               # nginx resolves replicas at startup
 node --import tsx apps/cli/src/main.ts --url http://localhost:8080 health               # repeated until N distinct instance ids (health-*.txt)
 # Drop every cache entry except the version counters. Each run then starts cold, and nothing built in its warm-up
 # can reach its 300 s TTL inside the recorded window:
@@ -92,6 +94,10 @@ Captured during every run:
 
 How the CPU figures below are computed:
 - Container CPU is the mean of the `docker stats` samples inside the recorded 60 s window, where 100% is one CPU.
+- Samples stamped within 3 s of the window's start or end, one at each boundary, are excluded as transition artifacts.
+  `docker stats --no-stream` measures over the 1 to 2 s after its timestamp, so a boundary sample can straddle the
+  phase change. For example, closed-1r-run1's sample stamped 1 s before the end reads the replica at 0.2%, after the
+  client had stopped.
 - Client CPU is the change in the client's cumulative CPU time over the same window.
 - "CPU per request" is the replicas' summed CPU divided by req/s.
 
@@ -107,6 +113,7 @@ How the CPU figures below are computed:
 | `cgroup-*.txt` | each replica's `cpu.stat` (usage, `nr_periods`, `nr_throttled`, `throttled_usec`) before and after |
 | `prewarm-*.txt` | the pre-warm before each open-model and write-mix run |
 | `*-coldstart-*`, `drain-*` | the two open-model attempts on a cold cache that collapsed |
+| `cold-page-build.txt` | cold vs warm build time of single listing pages (curl, idle stack), captured after the runs |
 
 ## Closed model: 100 workers, 60 s recorded after a 15 s warm-up
 
@@ -232,10 +239,15 @@ seconds of load and never recovered:
 - **No recovery.** 5 minutes after the client exited, Postgres was still at about 590% with 40 active queries
   (`drain-open-4r-coldstart-failed.txt`). It went idle only when the replicas were restarted: they keep working through
   queued queries whose clients have gone.
-- **Mechanism.** On an idle stack, building one cold category page (62k products) takes 220 to 240 ms, measured with
-  single `curl` requests. That is longer than the 200 ms a concurrent reader waits for it (`waitMs` in
-  `packages/core/src/cache/read-through.ts`). So under open-model load, every reader of a cold page falls through to its
-  own Postgres query. At a few thousand req/s, those queries arrive faster than Postgres finishes them.
+- **Mechanism.** On an idle stack, building one cold category page (62k products) takes 168 to 221 ms, mostly 170 to
+  180 ms. That was measured afterwards with single `curl` requests through both the dev API and one replica behind
+  nginx, captured in `cold-page-build.txt`. It is just under the 200 ms a concurrent reader waits for a build (`waitMs`
+  in `packages/core/src/cache/read-through.ts`), and the same page served warm takes about 2 ms. Under load, 40
+  concurrent builds share 6 CPUs, so each build takes longer than 200 ms. The pre-warm's cold phase shows this, with
+  requests taking seconds. Readers then give up waiting and run their own query, which adds more load. This feedback
+  loop is our reading of the numbers above; individual build times under load were not instrumented. (An earlier,
+  uncaptured spot check right after a restart gave 220 to 240 ms; the capture's first request on each path, 217 to
+  221 ms, matches that.)
 - **The pre-warm survived it.** The closed-model pre-warm (at most 100 requests in flight) filled the same cold cache
   without collapsing. Its p99.9 was 1.5 to 2.6 s and its max 4.3 to 7.4 s while it rebuilt.
 
