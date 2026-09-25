@@ -108,10 +108,10 @@ pnpm typecheck
 ```
 
 - `pnpm test` runs `packages/core`, `apps/api` and `apps/ingest` serially (`--workspace-concurrency=1`) because each truncates the same Postgres database. Tests wipe the tables, so re-run `pnpm seed` afterwards if you want demo data.
-- `pnpm test:unit` runs only `packages/core`. It still needs Postgres and Redis for four of its ten files (schema, queries, versions, read-through). The pure tests alone (money, pricing, CSV, chunking, cache keys) run with no infrastructure:
+- `pnpm test:unit` runs only `packages/core`. It still needs Postgres and Redis for four of its eleven files (schema, queries, versions, read-through). The pure tests alone (money, pricing, slugs, CSV, chunking, cache keys) run with no infrastructure:
 
   ```bash
-  pnpm --filter @modaco/core exec vitest run src/money.test.ts src/pricing src/ingest src/cache/keys.test.ts src/cache/redis.test.ts
+  pnpm --filter @modaco/core exec vitest run src/money.test.ts src/slug.test.ts src/pricing src/ingest src/cache/keys.test.ts src/cache/redis.test.ts
   ```
 
 ## Deploying the ingestion pipeline to AWS
