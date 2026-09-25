@@ -43,11 +43,26 @@ Resources:
         deadLetterTargetArn: !GetAtt DeadLetterQueue.Arn
         maxReceiveCount: 3
 
+  # S3 invokes the splitter asynchronously: Lambda retries a failed invocation twice, then the event would
+  # be dropped. This queue keeps it instead (the invocation record, wrapping the original S3 event) so an
+  # operator can inspect and replay it. It is not the chunk DLQ: the payload shape differs, and the
+  # dead-letter handler only understands chunk messages.
+  SplitterFailureQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+
   SplitterFunction:
     Type: AWS::Serverless::Function
     Properties:
       Handler: lambda.splitter
       Timeout: 30
+      EventInvokeConfig:
+        MaximumRetryAttempts: 2
+        DestinationConfig:
+          OnFailure:
+            Type: SQS
+            Destination: !GetAtt SplitterFailureQueue.Arn
       Policies:
         - S3ReadPolicy: { BucketName: !Sub '${AWS::StackName}-vendor-uploads' }
         - SQSSendMessagePolicy: { QueueName: !GetAtt ChunkQueue.QueueName }
@@ -94,3 +109,4 @@ Outputs:
   UploadsBucketName: { Value: !Ref UploadsBucket }
   ChunkQueueUrl: { Value: !Ref ChunkQueue }
   DeadLetterQueueUrl: { Value: !Ref DeadLetterQueue }
+  SplitterFailureQueueUrl: { Value: !Ref SplitterFailureQueue }

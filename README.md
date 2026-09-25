@@ -121,7 +121,7 @@ pnpm build:lambda                                  # esbuild bundle -> apps/inge
 sam deploy --guided --template infra/template.yaml
 ```
 
-`infra/template.yaml` creates the uploads bucket (`<stack-name>-vendor-uploads`), the chunk queue (visibility timeout 360 s, redrive to the DLQ after 3 receives), the DLQ, and three functions (splitter, worker with reserved concurrency 10 and `ScalingConfig.MaximumConcurrency` 10, dead-letter handler) on Node 22 arm64, 256 MB.
+`infra/template.yaml` creates the uploads bucket (`<stack-name>-vendor-uploads`), the chunk queue (visibility timeout 360 s, redrive to the DLQ after 3 receives), the DLQ, a splitter-failure queue (the splitter's `OnFailure` destination after 2 async retries; ADR §6.4), and three functions (splitter, worker with reserved concurrency 10 and `ScalingConfig.MaximumConcurrency` 10, dead-letter handler) on Node 22 arm64, 256 MB.
 
 Required parameters:
 
