@@ -9,7 +9,8 @@ let stub: StubApi;
 let client: ApiClient;
 const quiet = { log: () => {} };
 const opts = (over: Partial<RunOptions> = {}): RunOptions => ({
-  model: { kind: 'closed', concurrency: 4 }, durationMs: 400, warmupMs: 0, reportEveryMs: 0, seed: 7, options: {}, ...over,
+  model: { kind: 'closed', concurrency: 4 }, durationMs: 400, warmupMs: 0, reportEveryMs: 0, seed: 7,
+  timeoutMs: 5000, maxErrorRate: 0, options: {}, ...over,
 });
 
 beforeEach(async () => {
@@ -40,6 +41,26 @@ describe('browse', () => {
   it('honours --mix and --category', async () => {
     const doc = await runLoad(client, createScenario('browse', { maxPage: 2, mix: { list: 1 }, category: 'shoes' }), opts(), quiet);
     expect(Object.keys(doc.phases[0]!.byLabel)).toEqual(['list']);
+  });
+
+  it('clamps --max-page to the category real page count and logs it', async () => {
+    const small = await startStubApi({ total: 90 }); // ceil(90 / 20) = 5 pages
+    const c = new ApiClient({ baseUrl: small.url, timeoutMs: 5000 });
+    const pagesSeen = new Set<number>();
+    const spy: ApiClient = Object.create(c) as ApiClient;
+    spy.send = (spec) => {
+      if (spec.label === 'list') pagesSeen.add(Number(new URL(spec.path, 'http://x').searchParams.get('page')));
+      return c.send(spec);
+    };
+    const logs: string[] = [];
+    try {
+      await runLoad(spy, createScenario('browse', { maxPage: 10, category: 'shoes', mix: { list: 1 } }), opts({ durationMs: 400 }), { log: (m) => logs.push(m) });
+      expect(Math.max(...pagesSeen)).toBeLessThanOrEqual(5);
+      expect(logs).toContain("max-page for 'shoes' clamped 10 -> 5 (90 products)");
+    } finally {
+      await c.close();
+      await small.close();
+    }
   });
 
   it('fails setup on an empty catalog', async () => {
@@ -107,11 +128,13 @@ describe('write-mix', () => {
 });
 
 describe('flash-sale', () => {
-  it('records before and after phases, passes the mid-sale check, and cancels the promotion', async () => {
+  it('records before and after phases, passes the mid-sale and listing checks, and cancels the promotion', async () => {
     const doc = await runLoad(client, createScenario('flash-sale', { maxPage: 5, category: 'shoes' }), opts({ durationMs: 300 }), quiet);
     expect(doc.phases.map((p) => p.name)).toEqual(['before', 'after']);
-    expect(doc.checks).toHaveLength(1);
+    expect(doc.checks).toHaveLength(2);
     expect(doc.checks[0]).toMatchObject({ name: 'mid-sale product discounted', ok: true });
+    expect(doc.checks[1]).toMatchObject({ name: 'category listing reflects the promo', ok: true });
+    expect(doc.checks[1]!.message).toContain('10.00');
     expect(doc.notes.promotionId).toBe(stub.state.lastPromotionId);
     expect(doc.notes.firstItemPriceBefore).toBe('20.00');
     expect(doc.ok).toBe(true);
@@ -169,13 +192,33 @@ describe('flash-sale', () => {
     const c = new ApiClient({ baseUrl: wrong.url, timeoutMs: 5000 });
     try {
       const doc = await runLoad(c, createScenario('flash-sale', { maxPage: 5 }), opts({ durationMs: 300 }), quiet);
-      expect(doc.checks[0]).toMatchObject({ ok: false });
+      expect(doc.checks).toHaveLength(2);
+      expect(doc.checks[0]).toMatchObject({ name: 'mid-sale product discounted', ok: false });
       expect(doc.checks[0]!.message).toContain('expected 10.00');
+      // The listing endpoint isn't the one the stub broke, so it still shows the promo correctly.
+      expect(doc.checks[1]).toMatchObject({ name: 'category listing reflects the promo', ok: true });
       expect(doc.ok).toBe(false);
       expect(wrong.state.openPromotions.size).toBe(0);
     } finally {
       await c.close();
       await wrong.close();
+    }
+  });
+
+  it('fails the listing check when the category listing does not pick up the promo', async () => {
+    const stale = await startStubApi({ listingIgnoresPromotions: true });
+    const c = new ApiClient({ baseUrl: stale.url, timeoutMs: 5000 });
+    try {
+      const doc = await runLoad(c, createScenario('flash-sale', { maxPage: 5, category: 'shoes' }), opts({ durationMs: 300 }), quiet);
+      expect(doc.checks).toHaveLength(2);
+      expect(doc.checks[0]).toMatchObject({ name: 'mid-sale product discounted', ok: true });
+      expect(doc.checks[1]).toMatchObject({ name: 'category listing reflects the promo', ok: false });
+      expect(doc.checks[1]!.message).toContain('expected 10.00');
+      expect(doc.ok).toBe(false);
+      expect(stale.state.openPromotions.size).toBe(0);
+    } finally {
+      await c.close();
+      await stale.close();
     }
   });
 });

@@ -1,6 +1,6 @@
 import type { RequestSpec } from '../engine';
 import { pickWeighted, type Rng } from '../rng';
-import { detailRequest, listRequest, sampleCatalog, type CatalogSample } from './catalog';
+import { describeMaxPageClamp, detailRequest, listRequest, sampleCatalog, type CatalogSample } from './catalog';
 import { DEFAULT_PROMOTION_TTL_MS, type Scenario, type ScenarioOptions } from './types';
 
 export const WRITE_MIX_LABELS = ['list', 'detail', 'stock', 'promo'] as const;
@@ -13,7 +13,7 @@ const DEFAULT_MIX = { list: 60, detail: 25, stock: 14, promo: 1 };
 export function createWriteMix(opts: ScenarioOptions): Scenario {
   const mix = opts.mix ?? DEFAULT_MIX;
   const ttlMs = opts.promotionTtlMs ?? DEFAULT_PROMOTION_TTL_MS;
-  let sample: CatalogSample = { total: 0, ids: [], slugs: [] };
+  let sample: CatalogSample = { total: 0, ids: [], slugs: [], totalsBySlug: {} };
   /** Created, no cancel sent yet: the next promo slot cancels the oldest. */
   const open: string[] = [];
   /** Created, cancel not yet confirmed: cleanup cancels whatever is left. */
@@ -49,6 +49,7 @@ export function createWriteMix(opts: ScenarioOptions): Scenario {
     async setup(client, log) {
       sample = await sampleCatalog(client, { category: opts.category });
       log(`sampled ${sample.ids.length} product ids across ${sample.slugs.length} categories (catalog total ${sample.total})`);
+      for (const line of describeMaxPageClamp(sample, opts.maxPage)) log(line);
     },
     next(rng) {
       switch (pickWeighted(rng, mix)) {
