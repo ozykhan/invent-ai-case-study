@@ -80,6 +80,16 @@ describe('overload error mapping', () => {
     await expectOverloaded(drizzleWrapped(pgErr));
   });
 
+  it('503 database_unavailable when a new pool connection times out while connecting, raw or wrapped by drizzle', async () => {
+    // pg-pool's error when connectionTimeoutMillis expires during a *new* connection's handshake: no SQLSTATE.
+    const connectTimeout = () => new Error('Connection terminated due to connection timeout', { cause: new Error('timeout expired') });
+    for (const err of [connectTimeout(), drizzleWrapped(connectTimeout())]) {
+      const res = await request(app(err)).get('/boom');
+      expect(res.status).toBe(503);
+      expect(res.body.error.code).toBe('database_unavailable');
+    }
+  });
+
   it('keeps 503 database_unavailable for connection failures', async () => {
     const res = await request(app(Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }))).get('/boom');
     expect(res.status).toBe(503);

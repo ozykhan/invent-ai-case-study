@@ -9,17 +9,25 @@ const DB_UNAVAILABLE = new Set(['ECONNREFUSED', 'ETIMEDOUT', '57P01', '57P02', '
 const STATEMENT_TIMEOUT = '57014';
 /** node-pg's pool rejects an acquire that waited past connectionTimeoutMillis with this message; drizzle wraps it in `cause`. */
 const POOL_ACQUIRE_TIMEOUT = /timeout exceeded when trying to connect/i;
+/** pg-pool's error when connectionTimeoutMillis expires during a new connection's handshake. It has no SQLSTATE. */
+const CONNECT_TIMEOUT = /connection terminated due to connection timeout/i;
 
-function isPoolAcquireTimeout(err: unknown): boolean {
+/** Whether any message along the `cause` chain (drizzle wraps driver errors) matches. */
+function messageMatches(err: unknown, pattern: RegExp): boolean {
   for (let e = err as { message?: unknown; cause?: unknown } | undefined, depth = 0; e && depth < 5; e = e.cause as typeof e, depth++) {
-    if (typeof e.message === 'string' && POOL_ACQUIRE_TIMEOUT.test(e.message)) return true;
+    if (typeof e.message === 'string' && pattern.test(e.message)) return true;
   }
   return false;
 }
 
+function isDbUnavailable(err: unknown): boolean {
+  const code = pgErrorCode(err);
+  return (code !== undefined && DB_UNAVAILABLE.has(code)) || messageMatches(err, CONNECT_TIMEOUT);
+}
+
 /** The request was shed, not failed: a cache waiter gave up, the pool queue was too long, or a statement ran too long. */
 function isOverload(err: unknown): boolean {
-  return err instanceof CacheWaitTimeoutError || isPoolAcquireTimeout(err) || pgErrorCode(err) === STATEMENT_TIMEOUT;
+  return err instanceof CacheWaitTimeoutError || messageMatches(err, POOL_ACQUIRE_TIMEOUT) || pgErrorCode(err) === STATEMENT_TIMEOUT;
 }
 
 export function errorHandler(logger: Logger): ErrorRequestHandler {
@@ -40,8 +48,7 @@ export function errorHandler(logger: Logger): ErrorRequestHandler {
       res.status(503).set('Retry-After', '1').json({ error: { code: 'overloaded', message: 'service overloaded, retry shortly' } });
       return;
     }
-    const code = pgErrorCode(err);
-    if (code && DB_UNAVAILABLE.has(code)) {
+    if (isDbUnavailable(err)) {
       logger.error({ err, requestId }, 'database unavailable');
       res.status(503).json({ error: { code: 'database_unavailable', message: 'database unavailable' } });
       return;
