@@ -186,7 +186,7 @@ describe('load command', () => {
     }
   });
 
-  it('SIGINT during a load run exits 130 and leaves no open promotions on the stub', async () => {
+  it('SIGINT during a load run exits 130 (not by signal) and leaves no open promotions on the stub', async () => {
     // Its own stub, not the shared one: other tests in this file leave promotions open on purpose (e.g. the
     // retargeting test above never cancels its promotion), so asserting a global 0 against the shared stub would
     // depend on test order instead of on this run's own cleanup.
@@ -197,12 +197,36 @@ describe('load command', () => {
         ['--import', 'tsx', 'src/main.ts', '--url', own.url, 'load', 'write-mix', '--concurrency', '8', '--duration', '10s', '--warmup', '0s', '--mix', 'promo=1'],
         { cwd: cliDir, env: { ...process.env, API_URL: '' } },
       );
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      child.kill('SIGINT');
-      const code: number = await new Promise((resolve) => {
-        child.on('exit', (code) => resolve(code ?? 0));
+      // Attached before anything else can happen, so a fast exit is never missed.
+      const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+        child.once('exit', (code, signal) => resolve({ code, signal }));
       });
+
+      // Proof the load phase actually started -- not a blind sleep, which either races tsx's startup time on a
+      // loaded machine (too short) or sends SIGINT well after the run is already underway (too long, and closer to
+      // testing the drain path than the "abort while running" path this test is for).
+      await new Promise<void>((resolve, reject) => {
+        let buf = '';
+        const onData = (chunk: Buffer) => {
+          buf += chunk.toString();
+          if (buf.includes('phase main')) cleanup(resolve);
+        };
+        const onExit = (code: number | null) => cleanup(() => reject(new Error(`child exited (code ${code}) before the load phase started; stderr/stdout so far:\n${buf}`)));
+        const cleanup = (then: () => void) => {
+          child.stdout?.off('data', onData);
+          child.stderr?.off('data', onData);
+          child.off('exit', onExit);
+          then();
+        };
+        child.stdout?.on('data', onData);
+        child.stderr?.on('data', onData);
+        child.once('exit', onExit);
+      });
+
+      child.kill('SIGINT');
+      const { code, signal } = await exited;
       expect(code).toBe(130);
+      expect(signal).toBeNull();
       expect(own.state.openPromotions.size).toBe(0);
     } finally {
       await own.close();
